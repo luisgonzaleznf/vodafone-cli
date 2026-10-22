@@ -8,17 +8,20 @@ A release is pinned in three places:
 | File | What | When it changes |
 |---|---|---|
 | `pyproject.toml` (and the `vodafone-cli` entry in `uv.lock`) | `version` | in the release PR |
+| `README.md` | the `@vX.Y.Z` of the `uvx` (MCP) and `uv tool install` lines | in the release PR; the tag follows the merge |
 | `Formula/vodafone.rb` | `tag:` and `revision:` | after the tag exists |
 | `install.sh` | `DEFAULT_VERSION` | after the tag exists, with the formula |
 
-`tests/test_packaging.py` fails if the formula and `install.sh` point at different releases.
+`tests/test_packaging.py` fails if the formula and `install.sh` point at different releases, or if
+the README's lines pin another release than `pyproject.toml`.
 
 ## 1. Release PR
 
 On a branch:
 
 ```bash
-# bump `version` in pyproject.toml, then refresh the project's own entry in the lockfile
+# bump `version` in pyproject.toml and the README's @vX.Y.Z pins, then refresh the project's own
+# entry in the lockfile
 uv lock
 uv run pytest
 shellcheck install.sh
