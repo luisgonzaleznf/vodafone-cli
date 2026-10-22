@@ -173,11 +173,7 @@ def build_server(
             return _signed_in(attempt)
         if not attempt.active:
             return _text("The sign-in page has closed (it expired or was replaced). Call login again for a new link.")
-        return _text(
-            "Still waiting: finish signing in to Vodafone in the browser (the page stays open for about "
-            f"{max(1, attempt.seconds_left() // 60)} more minutes). The Vodafone tools work as soon as the "
-            "sign-in is done; auth_status shows when."
-        )
+        return _still_waiting(attempt)
 
     @server.tool(annotations=SIGN_IN)
     async def login(ctx: Context) -> CallToolResult | InputRequiredResult:
@@ -186,7 +182,7 @@ def build_server(
         them pass through the chat, so never ask for them. Use it when the user asks to sign in to
         Vodafone, or agrees to after a tool failed with auth_expired. It writes only the local token
         file and changes nothing in the Vodafone account. The page works for 10 minutes; calling login
-        again meanwhile returns the same page."""
+        again meanwhile returns the same link, without asking the user again."""
         # The second round of a URL elicitation sent as an InputRequiredResult (2026-07-28 and later):
         # the host showed the link, the user answered, and the host retried this call.
         if ctx.input_responses is not None and _ELICITATION in ctx.input_responses:
@@ -195,7 +191,9 @@ def build_server(
                 return _text("That sign-in link is no longer valid. Call login again for a new one.")
             return await _answered(attempt, ctx.input_responses[_ELICITATION])
 
-        attempt = signins.begin()
+        attempt, created = signins.begin()
+        if not created:  # already open, maybe mid-way: point at it again, never a second prompt
+            return _still_waiting(attempt, link=True)
         if _offers_url_elicitation(ctx):
             try:
                 answer = await ctx.elicit_url(_ELICIT_MESSAGE, attempt.url, attempt.id)
@@ -232,12 +230,27 @@ def build_server(
         )
 
     async def _answered(attempt: signin.SignIn, answer: object) -> CallToolResult:
+        """The user's answer to the elicitation of a sign-in this login call created."""
         if getattr(answer, "action", None) != "accept":
+            if attempt.bound:  # a browser is already on the page (it had the link): leave it be
+                return _text(
+                    "The prompt was dismissed, but the Vodafone sign-in page is already in use in the browser, "
+                    "so it stays open: finish signing in there."
+                )
             signins.cancel(attempt)
             return _text("Sign-in cancelled: the user did not open the Vodafone sign-in page. Nothing was saved.")
         return await wait_for(attempt)
 
     return server
+
+
+def _still_waiting(attempt: signin.SignIn, *, link: bool = False) -> CallToolResult:
+    where = f" If the page isn't open, open this link on this computer:\n{attempt.url}\n\n" if link else " "
+    return _text(
+        f"Still waiting: finish signing in to Vodafone in the browser.{where}The page stays open for about "
+        f"{max(1, attempt.seconds_left() // 60)} more minutes. The Vodafone tools work as soon as the sign-in "
+        "is done; auth_status shows when."
+    )
 
 
 def _signed_in(attempt: signin.SignIn) -> CallToolResult:

@@ -405,16 +405,16 @@ def test_nothing_is_logged(signin, vodafone, capfd):
 def test_the_manager_runs_one_sign_in_at_a_time(store, vodafone):
     manager = SignInManager(store)
     try:
-        first = manager.begin()
-        assert manager.begin() is first  # the same link while it is in progress
+        first, created = manager.begin()
+        assert created and manager.begin() == (first, False)  # the same link while it is in progress
         assert manager.find(first.id) is first and manager.find("other") is None and manager.find(None) is None
 
         with _browser(first) as browser:
             _sign_in(browser, first)
         assert first.stopped.is_set()
 
-        second = manager.begin()
-        assert second is not first and second.secret != first.secret and second.port != first.port
+        second, created = manager.begin()
+        assert created and second is not first and second.secret != first.secret and second.port != first.port
         manager.cancel(second)
         assert second.stopped.is_set() and manager.find(second.id) is None
     finally:

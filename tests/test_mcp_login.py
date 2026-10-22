@@ -159,9 +159,10 @@ async def test_login_again_returns_the_same_link_while_it_is_open(tokens_path, v
     opener = Opener()
     async with Client(build_server(tokens_path, open_browser=opener)) as client:
         await client.call_tool("login", {})
-        await client.call_tool("login", {})
+        again = (await client.call_tool("login", {})).content[0].text
 
-    assert len(opener.urls) == 2 and opener.urls[0] == opener.urls[1]
+    assert len(opener.urls) == 1  # no second browser window
+    assert again.startswith("Still waiting") and opener.urls[0] in again
 
 
 def test_the_default_opener_runs_webbrowser_in_a_child_with_the_url_on_stdin(monkeypatch):
@@ -243,6 +244,65 @@ async def test_a_declined_elicitation_cancels_the_sign_in(tokens_path, vodafone,
     with httpx.Client(base_url="/".join(base[:3]), trust_env=False) as browser:
         assert browser.get("/" + base[3]).status_code == 410  # the link is dead
     assert not tokens_path.exists() and vodafone["requests"] == []
+
+
+def _browser_for(url: str) -> tuple[httpx.Client, str]:
+    origin = url.split("/", 3)
+    base = "/".join(origin[:3])
+    return httpx.Client(base_url=base, headers={"Origin": base}, timeout=10, trust_env=False), "/" + origin[3]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize("second_answer", ["decline", "cancel", "accept"])
+async def test_login_again_mid_sign_in_neither_prompts_nor_breaks_the_page(tokens_path, vodafone, mode, second_answer):
+    answers, prompts = ["accept", second_answer], []
+
+    async def callback(context, params):
+        prompts.append(params)
+        return ElicitResult(action=answers.pop(0))
+
+    async with Client(build_server(tokens_path, login_wait=0.2), mode=mode, elicitation_callback=callback) as client:
+        assert (await client.call_tool("login", {})).content[0].text.startswith("Still waiting")
+        url = prompts[0].url
+        browser, path = _browser_for(url)
+        with browser:
+            assert browser.post(path + "start", data={"username": USERNAME, "password": PASSWORD}).status_code == 200
+
+            again = (await client.call_tool("login", {})).content[0].text
+
+            assert len(prompts) == 1  # not asked a second time, so a dismissal can't end the page
+            assert again.startswith("Still waiting") and url in again
+            assert browser.post(path + "send", data={"line": LINE}).status_code == 200
+            assert "Signed in" in browser.post(path + "finish", data={"code": OTP_CODE}).text
+        account = await client.call_tool("get_account", {})
+
+    assert not account.is_error
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+async def test_a_dismissed_prompt_leaves_a_page_a_browser_already_uses(tokens_path, vodafone, mode):
+    tab = {}
+
+    async def opens_the_page_then_dismisses(context, params):
+        # The user already has the page open (from an earlier link) and got past page 1.
+        tab["browser"], tab["path"] = _browser_for(params.url)
+        start = lambda: tab["browser"].post(tab["path"] + "start", data={"username": USERNAME, "password": PASSWORD})
+        assert (await anyio.to_thread.run_sync(start)).status_code == 200
+        return ElicitResult(action="decline")
+
+    async with Client(build_server(tokens_path), mode=mode, elicitation_callback=opens_the_page_then_dismisses) as client:
+        result = (await client.call_tool("login", {})).content[0].text
+        browser, path = tab["browser"], tab["path"]  # the same tab, holding the page's cookie
+        try:
+            assert browser.post(path + "send", data={"line": LINE}).status_code == 200
+            assert "Signed in" in browser.post(path + "finish", data={"code": OTP_CODE}).text
+        finally:
+            browser.close()
+        account = await client.call_tool("get_account", {})
+
+    assert "stays open" in result and not account.is_error
 
 
 @pytest.mark.anyio

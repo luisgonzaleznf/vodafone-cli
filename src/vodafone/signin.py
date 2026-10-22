@@ -461,16 +461,16 @@ class SignInManager:
         self._current: SignIn | None = None
         self._ended: list[SignIn] = []  # still bound, see SignIn.stop
 
-    def begin(self) -> SignIn:
-        """The sign-in in progress, or a new one if there is none."""
+    def begin(self) -> tuple[SignIn, bool]:
+        """The sign-in in progress, or a new one if there is none; True if it is new."""
         with self._lock:
             if self._current is not None and self._current.active:
-                return self._current
+                return self._current, False
             if self._current is not None:
                 self._current.stop()
                 self._ended.append(self._current)
             self._current = SignIn(self._store, ttl=self._ttl, serial=self._serial)
-            return self._current
+            return self._current, True
 
     def find(self, signin_id: str | None) -> SignIn | None:
         """The current sign-in if its id matches (an id echoed back by the MCP host)."""
