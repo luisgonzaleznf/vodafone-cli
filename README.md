@@ -14,9 +14,9 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 | `vodafone usage` | In-plan allowances (data / voice / SMS) per line | ✅ |
 | `vodafone auth status` | Access-token validity and refresh-token days remaining (offline) | ✅ |
 | `vodafone mcp` | Read-only MCP server (stdio) exposing the read commands as tools | ✅ |
-| `vodafone invoices list` | Invoices with amount, dates and status | ⚠️ see [Limitations](#limitations) |
-| `vodafone invoices download` | Invoice PDFs | 🚧 not implemented |
-| `vodafone auth refresh` | Refresh the access token | 🚧 not implemented |
+| `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
+| `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
+| `vodafone auth refresh` | Refresh the access token | 🚧 not implemented (see [Limitations](#limitations)) |
 
 Write actions (add-ons, tariff changes, roaming, …) are out of scope for this release.
 
@@ -67,7 +67,7 @@ The CLI looks for the file in this order:
 4. `.local-secrets/tokens.json` in the checkout
 
 Run `vodafone auth status` to see when the access token expires. Token refresh is not implemented
-yet, so re-export the file when it does. Token values are never printed or logged.
+yet (see [Limitations](#limitations)), so re-export the file when it does. Token values are never printed or logged.
 
 ## Usage
 
@@ -80,6 +80,9 @@ vodafone lines                # lines and tariffs (same as `vodafone lines list`
 vodafone usage                # allowances for every line
 vodafone usage --line 1234    # one line: full number / service id, or unique trailing digits
 vodafone invoices list        # invoices
+vodafone invoices download            # latest invoice PDF into the current directory
+vodafone invoices download all --dir ~/facturas
+vodafone invoices download <id>       # one invoice; ids come from `invoices list`
 vodafone mcp                  # MCP server on stdio (see below)
 ```
 
@@ -141,7 +144,22 @@ The JSON shapes are stable and defined by the output models in
     }
   ]
 }
+
+// vodafone invoices download all --dir facturas
+{
+  "account_id": "…",
+  "directory": "facturas",
+  "invoices": [
+    {"id": "…", "month": "2026-10", "file": "facturas/factura_2026-10.pdf", "bytes": 812345, "status": "downloaded"},
+    {"id": "…", "month": "2026-09", "file": "facturas/factura_2026-09.pdf", "bytes": 798112, "status": "skipped"}
+  ]
+}
 ```
+
+Invoice PDFs are saved as `factura_YYYY-MM.pdf` (by billing month; two bills in the same month get
+a `_<id>` suffix). Existing files are skipped, never overwritten. `all` downloads newest first,
+one at a time with a 2-second gap, because a burst of downloads stalls Vodafone's backend; it stops
+at the first failure and the error names the files saved so far.
 
 `unlimited: true` means there is no numeric cap; the totals then show whatever Vodafone reports
 (often `0` for voice and SMS). Vodafone itself publishes usage data with a 24–48 h delay.
@@ -158,7 +176,7 @@ Errors are written to stderr as JSON:
 |---|---|---|
 | 0 | | Success |
 | 1 | `internal` | Unexpected error (only the exception type is reported) |
-| 2 | `usage`, `not_implemented` | Invalid arguments, or a command that is not implemented yet |
+| 2 | `usage`, `not_implemented` | Invalid arguments (unknown line, unknown invoice id, …), or a command that is not implemented yet |
 | 3 | `auth_expired` | The access token expired or the token file is missing; re-export it |
 | 3 | `access_denied` | HTTP 401 while the token is still valid: that account or line was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot-protection page, 403 or 429; or a Vodafone 5xx, timeout or stall. Back off before retrying |
@@ -182,7 +200,8 @@ Claude Code or Claude Desktop can call the read commands as tools.
 - Each tool returns the CLI's JSON, both as text and as structured content with an output schema.
   A failed call is returned with `isError` set and the CLI's `{"error": {...}}` payload as its
   text.
-- All tools are annotated read-only. No write tools are exposed.
+- All tools are annotated read-only. No write tools are exposed, and invoice PDF downloads are
+  CLI-only.
 - Tool calls run one at a time, and the token file is re-read on every call, so a re-exported
   file is picked up without restarting the server.
 
@@ -215,15 +234,11 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 
 ## Limitations
 
-- **`invoices list`** queries the TMF678 bill endpoint
-  (`/es/csm-api/customerBillAPI/v3/customerBill`), filtered by billing account and the account
-  holder's document ID (read from the API). In testing, Vodafone's billing backend answered with
-  HTTP 500 (`No se han obtenido datos en la llamada a RMCA…`), so the command exits with code 5.
-  The exact query the web app sends has not been confirmed yet.
-- **`auth refresh`** is not implemented: the refresh-token request has not been captured from a
-  real login yet. Re-export the token file instead (the access token lasts ~24 h).
-- **`invoices download`** is not implemented: it needs the field that carries each bill's
-  download token.
+- **`auth refresh`** is not implemented. The web app's own refresh request has not been
+  captured (a login never sends one), and the standard OAuth2 refresh body
+  (`grant_type=refresh_token`, `refresh_token`, `client_id`) was refused by the token endpoint with
+  HTTP 403. Until a real refresh request is captured, re-export the token file when the access
+  token expires (it lasts ~24 h).
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.
@@ -232,7 +247,8 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 
 ```bash
 uv sync
-uv run pytest          # offline: mocked DXL API, synthetic data only
+uv run pytest                     # offline: mocked DXL API, synthetic data only
+VODAFONE_LIVE=1 uv run pytest     # also runs read-only checks against your account
 ```
 
 ```
@@ -246,7 +262,7 @@ src/vodafone/
   tokens.py       token-set loading and expiry checks
   errors.py       typed errors and exit codes
   config.py       hosts, header constants, token-file lookup
-tests/            unit tests (CLI, client, MCP server)
+tests/            unit tests (CLI, client, invoices, MCP server) and opt-in live tests
 ```
 
 ## Disclaimer

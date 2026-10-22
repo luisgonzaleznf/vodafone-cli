@@ -27,3 +27,6 @@ module-name = "vodafone"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+markers = ["live: runs against the real account; skipped unless VODAFONE_LIVE=1"]

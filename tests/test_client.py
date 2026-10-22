@@ -24,6 +24,7 @@ CSRF = "c" * 36
 ACCOUNT = "100000001"
 MOBILE = "600000001"
 FIBRE = "J00000ANF000"
+DOCUMENT = "00000000T"
 
 
 def _jwt(claims: dict) -> str:
@@ -42,7 +43,7 @@ def _tokens(*, expired: bool = False) -> TokenSet:
         access_token=ACCESS,
         csrf_token=CSRF,
         refresh_token="r" * 32,
-        jwt=_jwt({"userProfile": {"services": services}}),
+        jwt=_jwt({"userProfile": {"services": services, "document": {"id": DOCUMENT}}}),
         access_expires_at=now + (timedelta(hours=-1) if expired else timedelta(hours=1)),
         refresh_expires_at=now + timedelta(days=80),
     )
@@ -195,7 +196,7 @@ def test_missing_balances_items_is_api_changed():
             api.get_usage(client, line=MOBILE)
 
 
-def test_invoices_query_holder_nif_and_map_tmf678_bills():
+def test_invoices_query_the_jwt_document_with_the_process_header():
     bills = [
         {
             "id": {"value": "F-1"},
@@ -209,21 +210,20 @@ def test_invoices_query_holder_nif_and_map_tmf678_bills():
     requested = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        requested[path] = dict(request.url.params)
-        return _json(200, {
-            "/v2/customer/customerAccounts": ACCOUNTS,
-            f"/v2/customer/customerAccounts/{ACCOUNT}/billingAccounts": {"user": {"nif": "00000000T"}, "items": [{"id": ACCOUNT}]},
-            "/es/csm-api/customerBillAPI/v3/customerBill": bills,
-        }[path])
+        requested[request.url.path] = request
+        return _json(200, {"/v2/customer/customerAccounts": ACCOUNTS, "/es/csm-api/customerBillAPI/v3/customerBill": bills}[request.url.path])
 
     with _client(handler) as client:
         out = api.get_invoices(client)
 
-    params = requested["/es/csm-api/customerBillAPI/v3/customerBill"]
-    assert params["billingAccountId"] == ACCOUNT
-    assert params["relatedParty[?(@.role=='Individual')].id"] == "00000000T"
-    assert params["relatedParty.role"] == "Individual"
+    assert set(requested) == {"/v2/customer/customerAccounts", "/es/csm-api/customerBillAPI/v3/customerBill"}
+    bill_request = requested["/es/csm-api/customerBillAPI/v3/customerBill"]
+    assert dict(bill_request.url.params) == {
+        "billingAccountId": ACCOUNT,
+        "relatedParty[?(@.role=='Individual')].id": DOCUMENT,
+        "relatedParty.role": "Individual",
+    }
+    assert bill_request.headers["x-vf-api-process"] == "ConsultarEstadoFacturas"
     inv = out.invoices[0]
     assert (inv.id, inv.number, inv.amount, inv.net_amount, inv.currency, inv.issued_at) == (
         "F-1", "123", 45.10, 37.27, "EUR", "2001-02-03T00:00:00"

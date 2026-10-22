@@ -14,3 +14,7 @@ dist/
 # Internal — kept local, not published
 /docs/
 /verify_phase0.py
+
+# Downloaded invoices / partial downloads
+*.pdf
+*.part

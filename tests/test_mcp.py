@@ -78,7 +78,7 @@ def tokens_file(tmp_path):
         "accessToken": SECRET,
         "userCsrfToken": "c" * 36,
         "accessTokenExpirationTime": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-        "jwt": [_jwt({"userProfile": {"services": services}})],
+        "jwt": [_jwt({"userProfile": {"services": services, "document": {"id": NIF}}})],
     }))
     return path
 
