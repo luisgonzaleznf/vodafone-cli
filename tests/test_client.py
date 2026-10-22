@@ -207,7 +207,7 @@ def test_invoices_query_the_jwt_document_with_the_process_header():
             "status": "settled",
             "type": "regular",
             "details": {"dueDateTime": {"value": "2001-02-20T00:00:00"}, "chargeDateTime": {"value": "2001-02-03T00:00:00"}},
-            "amountsDue": {"amount": {"value": "45.10", "currencyID": "EUR"}, "netAmount": {"value": "37.27"}},
+            "amountsDue": {"amount": {"value": "37.27", "currencyID": "EUR"}, "netAmount": {"value": "45.10"}},
         }
     ]
     requested = {}

@@ -135,8 +135,8 @@ class WireAmount(Wire):
 
 
 class WireAmountsDue(Wire):
-    amount: WireAmount | None = None
-    netAmount: WireAmount | None = None
+    amount: WireAmount | None = None  # before tax
+    netAmount: WireAmount | None = None  # the total to pay, IVA included, despite the name
 
 
 class WireBillDetails(Wire):
@@ -275,8 +275,8 @@ class Invoice(BaseModel):
     type: str | None
     issued_at: str | None
     due_at: str | None
-    amount: float | None
-    net_amount: float | None
+    amount: float | None  # the total to pay, IVA included
+    net_amount: float | None  # before tax
     currency: str | None
 
 

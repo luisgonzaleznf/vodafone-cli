@@ -158,7 +158,9 @@ The JSON shapes are stable and defined by the output models in
   "invoices": [
     {
       "id": "…", "number": "…", "billing_account_id": "…", "status": "…", "type": "…",
-      "issued_at": "…", "due_at": "…", "amount": 0.0, "net_amount": 0.0, "currency": "EUR"
+      "issued_at": "…", "due_at": "…", "currency": "EUR",
+      "amount": 0.0,                   // the total to pay, IVA included
+      "net_amount": 0.0                // before tax
     }
   ]
 }
