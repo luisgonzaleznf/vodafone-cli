@@ -80,6 +80,45 @@ def test_injects_headers_with_a_fresh_trace_id_per_request():
     assert seen[0].headers["vf-trace-transaction-id"] != seen[1].headers["vf-trace-transaction-id"]
 
 
+def test_auth_posts_pair_the_csrf_cookie_with_the_header_and_keep_the_jar():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={}, headers={"set-cookie": "JSESSIONID=sess-1; Path=/"})
+
+    csrf = "0123abcd-" + "e" * 27
+    with _client(handler) as client:
+        client.post("/token", data={"grant_type": "password"}, headers={"vf-csrf-token": csrf}, bearer=False)
+        client.post("/otp", json={"code": "123456"}, headers={"vf-csrf-token": csrf})
+        client.get_json("/identity")
+
+    assert seen[0].headers["cookie"] == f"csrf-token={csrf}"
+    assert seen[1].headers["cookie"] == f"JSESSIONID=sess-1; csrf-token={csrf}"  # the jar's cookie is kept
+    assert seen[2].headers["cookie"] == "JSESSIONID=sess-1"  # the CSRF cookie never lands in the jar
+
+
+@pytest.mark.parametrize("csrf", ['synthetic; injected=value; quote="', "", "a b"])
+def test_an_unsafe_csrf_token_is_refused_before_anything_is_sent(csrf):
+    seen = []
+    with _client(lambda r: seen.append(r) or _json(200, {})) as client:
+        with pytest.raises(AuthError) as exc:
+            client.post("/token", data={"grant_type": "password"}, headers={"vf-csrf-token": csrf}, bearer=False)
+
+    assert seen == []
+    assert "injected" not in str(exc.value)
+
+
+def test_auth_post_errors_name_the_dxl_ecode_but_never_free_text():
+    body = {"code": "1007", "reason": "UNAUTHORIZED", "message": f"bad login for {MOBILE}", "status": "401", "ecode": "1007"}
+    with _client(lambda r: _json(401, body)) as client:
+        with pytest.raises(AuthError) as exc:
+            client.post("/otp", json={"login_hint": MOBILE})
+
+    assert "(HTTP 401: ecode 1007)" in str(exc.value)
+    assert MOBILE not in str(exc.value)
+
+
 def test_401_with_expired_token_means_reexport():
     with _client(lambda r: _json(401, {"message": "UNAUTHORIZED"}), expired=True) as client:
         with pytest.raises(AuthError) as exc:

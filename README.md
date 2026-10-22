@@ -17,7 +17,7 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 | `vodafone mcp` | Read-only MCP server (stdio) exposing the read commands as tools | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
-| `vodafone auth refresh` | Refresh the access token | ⚠️ refused by the endpoint (see [Limitations](#limitations)) |
+| `vodafone auth refresh` | Refresh the access token (and rotate the refresh token) | ✅ |
 
 Write actions (add-ons, tariff changes, roaming, …) are out of scope for this release.
 
@@ -118,19 +118,21 @@ neither removes your token file.
 
 ## Authentication
 
-### Sign in (recommended)
+### Sign in
 
 ```bash
 vodafone auth login
 ```
 
-Prompts for your usuario (mobile number or email) and password, sends an SMS code to one of your
-lines, and asks for it — the same sign-in as the web app, no browser. On success it writes the
-token set to the token file, and every other command works. The password and the SMS code are
-read with hidden prompts and are never stored or logged. No text from the server's SMS challenge
-is shown (the CLI prints a fixed "code sent" line), and auth errors name only a standard OAuth2
-error code (e.g. `invalid_grant`), never the endpoint's free-text message or headers, which could
-echo what was sent.
+Prompts for your usuario (the account's sign-in: mobile number or email) and password, asks which
+of the account's lines should get the SMS code (shown masked, e.g. `6*****789`; pick with ↑/↓ and
+Enter), then asks for the code — the same sign-in as the web app, no browser. On success it writes
+the token set to the token file, and every other command works. The password is read with a
+hidden prompt; neither it nor the SMS code is stored or logged. No text from the server's SMS
+challenge is shown (the CLI prints a fixed "code sent" line), and auth errors name only a standard
+OAuth2 error code (e.g. `invalid_grant`) or Vodafone's numeric one (e.g. `ecode 1005`, returned for
+a wrong usuario or password), never the endpoint's free-text message or headers, which could echo
+what was sent.
 
 ### Browser token export (alternative)
 
@@ -163,9 +165,10 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
    else `.local-secrets/tokens.json` in the checkout
 
 `auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
-renamed into place. Run `vodafone auth status` to see when the access token
-expires; while refresh is refused by the endpoint (see [Limitations](#limitations)), run
-`auth login` again when it does. Token values are never printed or logged.
+renamed into place. Run `vodafone auth status` to see when the access token expires.
+`vodafone auth refresh` exchanges the refresh token (valid ~90 days) for a new access token and
+saves the rotated tokens; it needs no SMS code. If it returns `invalid_grant`, sign in again.
+Token values are never printed or logged.
 
 ## Usage
 
@@ -175,6 +178,7 @@ Every command writes JSON to stdout (`--version` and `--help` print plain text).
 vodafone --version            # installed version, e.g. 0.1.0
 vodafone auth login           # sign in (usuario + password + SMS code); saves the token set
 vodafone auth status          # token expiry; exits 3 if the access token has expired
+vodafone auth refresh         # exchange the refresh token and save any rotated tokens
 vodafone me                   # account details
 vodafone lines                # lines and tariffs (same as `vodafone lines list`)
 vodafone usage                # allowances for every line
@@ -361,12 +365,11 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 
 ## Limitations
 
-- **`auth refresh`** is implemented but currently refused by Vodafone. The standard OAuth2 refresh
-  request (`grant_type=refresh_token` + `refresh_token` + `client_id` + `scope`, with the same
-  headers as the password grant) is answered by the token endpoint with HTTP 403 `access_denied`.
-  The command makes one attempt, leaves the token file untouched on failure, and exits 3. Until the
-  exact refresh request the web app sends near the ~24 h access-token expiry is captured, use
-  `vodafone auth login` again instead (the access token lasts ~24 h).
+- **Native authentication** reproduces the web app's requests: a `csrf-token` cookie matching the
+  `vf-csrf-token` header, the session cookies the server sets during the SMS step, and the masked
+  number from the password grant as the SMS target. If Vodafone changes that flow, sign-in may
+  break before the data commands do; browser token export still works then. A refused refresh
+  leaves the token file untouched and exits 3.
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.

@@ -20,6 +20,7 @@ class WireTokenResponse(Wire):
     expires_in: str | int | None = None
     refresh_token: str | None = None
     refresh_token_expires: str | None = None  # epoch seconds, as a string
+    jws: str | None = None  # password grant: signed claims incl. the masked numbers for the SMS step
 
 
 # --- /v2/customer/customerAccounts[?fields=debtAmount] ---------------------------------------
