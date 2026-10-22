@@ -1,15 +1,17 @@
 """Read operations over DxlClient.
 
-Each public function returns an output model from models.py; the CLI and the future MCP server
-both call these.
+Each public function returns an output model from models.py; the CLI and the MCP server both
+call these through run_with_client.
 """
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .client import DxlClient
-from .errors import ApiShapeError, AuthError, UsageError
+from .errors import ApiShapeError, AuthError, UsageError, VodafoneError
 from .models import (
     Account,
     Balance,
@@ -33,12 +35,30 @@ from .models import (
     WireTariffs,
     WireUserProfile,
 )
+from .tokens import FileTokenStore
 
 T = TypeVar("T")
 
 # TMF678 related-party filter; not yet confirmed against a live capture of the web app's
 # Facturas screen (see README, Limitations).
 _RELATED_PARTY_ID = "relatedParty[?(@.role=='Individual')].id"
+
+
+def run_with_client(tokens_path: Path, fn: Callable[[DxlClient], T]) -> T:
+    """Load the token set, open a DxlClient and call `fn` with it.
+
+    The token file is re-read on every call, so a re-exported file is picked up without a restart.
+    Anything other than a VodafoneError is re-raised as one carrying only the exception type, since
+    messages can embed request URLs or headers.
+    """
+    try:
+        tokens = FileTokenStore(tokens_path).load()
+        with DxlClient(tokens) as client:
+            return fn(client)
+    except VodafoneError:
+        raise
+    except Exception as exc:
+        raise VodafoneError(f"unexpected internal error: {type(exc).__name__}") from None
 
 
 def _parse(model: type[T], data: Any, what: str) -> T:

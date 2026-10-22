@@ -2,7 +2,6 @@
 codes 2 (usage), 3 (auth), 5 (blocked/upstream) and 7 (API changed).
 """
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +15,7 @@ from . import api
 from .client import DxlClient
 from .config import TOKENS_FILE_ENV, default_tokens_path
 from .errors import EXIT_AUTH, NotCapturedError, VodafoneError
+from .output import render, render_error
 from .tokens import FileTokenStore
 
 app = typer.Typer(
@@ -41,25 +41,20 @@ class State:
 
 
 def _emit(payload: Any) -> None:
-    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    typer.echo(render(payload))
 
 
 def _fail(err: VodafoneError) -> NoReturn:
-    typer.echo(json.dumps({"error": err.to_dict()}, ensure_ascii=False), err=True)
+    typer.echo(render_error(err), err=True)
     raise typer.Exit(err.exit_code)
 
 
 def _run(ctx: typer.Context, fn: Callable[[DxlClient], BaseModel]) -> None:
     state: State = ctx.obj
     try:
-        tokens = FileTokenStore(state.tokens_path).load()
-        with DxlClient(tokens) as client:
-            result = fn(client)
+        result = api.run_with_client(state.tokens_path, fn)
     except VodafoneError as err:
         _fail(err)
-    except Exception as exc:
-        # Unexpected failures: report only the exception type, since messages can embed URLs or headers.
-        _fail(VodafoneError(f"unexpected internal error: {type(exc).__name__}"))
     _emit(result.model_dump(mode="json"))
 
 
@@ -179,6 +174,14 @@ def auth_refresh() -> None:
             "until then re-export .local-secrets/tokens.json from a logged-in browser"
         )
     )
+
+
+@app.command("mcp")
+def mcp_command(ctx: typer.Context) -> None:
+    """Run a read-only MCP server on stdio (tools: get_account, list_lines, get_usage, list_invoices)."""
+    from .mcp_server import build_server  # deferred: the MCP SDK is only needed by this command
+
+    build_server(ctx.obj.tokens_path, ctx.obj.account).run("stdio")
 
 
 def main() -> None:
