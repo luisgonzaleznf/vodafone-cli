@@ -2,6 +2,7 @@
 stand-in for Astral's installer that puts that stub where the real installer would. Synthetic
 credentials only."""
 
+import re
 import shutil
 import stat
 import subprocess
@@ -10,6 +11,8 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).parents[1] / "install.sh"
+# The release install.sh installs by default. Reading it here means a release bump needs no test edits.
+VERSION = re.search(r"^DEFAULT_VERSION=(\S+)$", SCRIPT.read_text(), re.M).group(1)
 SYSTEM_PATH = "/usr/bin:/bin"
 SECRET = "s3cr3t-token-value"
 
@@ -24,12 +27,12 @@ case "$*" in
     "tool dir --bin") printf '%s\\n' "$STUB_ROOT/bin" ;;
     "tool install "*)
         mkdir -p "$STUB_ROOT/bin"
-        printf '#!/bin/sh\\necho 0.1.0\\n' > "$STUB_ROOT/bin/vodafone"
+        printf '#!/bin/sh\\necho __VERSION__\\n' > "$STUB_ROOT/bin/vodafone"
         chmod +x "$STUB_ROOT/bin/vodafone"
         ;;
     *) exit 2 ;;
 esac
-"""
+""".replace("__VERSION__", VERSION)
 
 # Serves an "installer" that copies the stub uv into $FAKE_INSTALL_TARGET.
 STUB_CURL = """#!/bin/sh
@@ -77,8 +80,8 @@ def test_installs_the_pinned_tag_from_github(sandbox):
     result = _run(env)
 
     assert result.returncode == 0, result.stderr
-    assert "tool install vodafone-cli @ git+https://github.com/luisgonzaleznf/vodafone-cli.git@v0.1.0" in _calls(env)
-    assert "Installed vodafone 0.1.0" in result.stdout and "vodafone auth login" in result.stdout
+    assert f"tool install vodafone-cli @ git+https://github.com/luisgonzaleznf/vodafone-cli.git@v{VERSION}" in _calls(env)
+    assert f"Installed vodafone {VERSION}" in result.stdout and "vodafone auth login" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -160,7 +163,7 @@ def test_plain_sources_are_accepted(sandbox, source):
     result = _run(env, VODAFONE_CLI_SOURCE=source)
 
     assert result.returncode == 0, result.stderr
-    assert f"tool install vodafone-cli @ git+{source}@v0.1.0" in _calls(env)
+    assert f"tool install vodafone-cli @ git+{source}@v{VERSION}" in _calls(env)
 
 
 # Where Astral's installer puts uv, by its precedence: UV_INSTALL_DIR, CARGO_DIST_FORCE_INSTALL_DIR,
@@ -205,4 +208,4 @@ def test_an_editable_install_is_left_alone_unless_forced(sandbox):
     assert refused.returncode == 1 and "editable" in refused.stderr
     assert forced.returncode == 0, forced.stderr
     installs = [call for call in _calls(env) if call.startswith("tool install")]
-    assert installs == ["tool install vodafone-cli @ git+https://github.com/luisgonzaleznf/vodafone-cli.git@v0.1.0 --force"]
+    assert installs == [f"tool install vodafone-cli @ git+https://github.com/luisgonzaleznf/vodafone-cli.git@v{VERSION} --force"]

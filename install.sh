@@ -19,7 +19,7 @@
 
 set -eu
 
-DEFAULT_VERSION=0.1.0
+DEFAULT_VERSION=0.2.0
 DEFAULT_SOURCE=https://github.com/luisgonzaleznf/vodafone-cli.git
 UV_INSTALLER=https://astral.sh/uv/install.sh
 
