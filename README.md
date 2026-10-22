@@ -155,13 +155,23 @@ Run `vodafone auth status` to see when the access token expires (it never refres
 
 The access token lasts about 24 hours and the refresh token about 90 days. Every read command (and
 read tool) refreshes the access token first when it has expired or expires within a minute, if the
-refresh token is still valid: one request, no SMS code, and the rotated tokens are saved to the
-file. `vodafone auth refresh` does the same on demand. If a refresh fails, the file is left as it
-was and the command exits 3 (`auth_expired`); if Vodafone refused the refresh token
-(`invalid_grant`), sign in again. A refresh is tried once, never in a loop. Since the CLI and
-several MCP hosts can run at once and the refresh token rotates, every refresh and sign-in holds a
-lock on `tokens.json.lock` (an empty file next to the token file, mode `0600`); a process that
-waited for it uses the tokens the other one saved. Token values are never printed or logged.
+refresh token is still valid: two requests (the refresh grant, then the identity JWT), no SMS code,
+and the rotated tokens are saved to the file. `vodafone auth refresh` does the same on demand.
+
+A refresh is tried once per command, never in a loop, and a failed one leaves the file as it was.
+If the access token is still valid (it had less than a minute left), the read goes ahead with it.
+Otherwise:
+
+- Vodafone refused the refresh token (`invalid_grant`, say): exit 3 (`auth_expired`); sign in
+  again. Until you do, each read tries the refused token once more.
+- Vodafone is unavailable or blocked the request: exit 5, as for any other request; try again
+  later, the session is not lost.
+
+Since the CLI and several MCP hosts can run at once and the refresh token rotates, every refresh
+and sign-in holds a lock on `tokens.json.lock` (an empty file next to the token file, mode
+`0600`); a process that waited for it uses the tokens the other one saved. If that file can't be
+created (a read-only folder), a read that needs a refresh exits 2. Token values are never printed
+or logged.
 
 ## Usage
 
@@ -286,22 +296,23 @@ response headers: such values are masked or replaced by fixed text.
 |---|---|---|
 | 0 | | Success |
 | 1 | `internal` | Unexpected error (only the exception type is reported) |
-| 2 | `usage` | Invalid arguments (unknown line, unknown invoice id, …), or a `--dir` whose filesystem has no hard links |
-| 3 | `auth_expired` | Not signed in: the token file is missing or malformed, or the access token expired and could not be refreshed (no refresh token, it expired, or the refresh failed); run `vodafone auth login` |
+| 2 | `usage` | Invalid arguments (unknown line, unknown invoice id, …), a `--dir` whose filesystem has no hard links, or a token-file folder where the lock file can't be created |
+| 3 | `auth_expired` | Not signed in: the token file is missing or malformed, or the access token expired and can't be renewed (no refresh token, it expired, or Vodafone refused it); run `vodafone auth login` |
 | 3 | `access_denied` | HTTP 401 while the token is still valid: that account or line was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot-protection page, 403 or 429; or a Vodafone 5xx, timeout or stall. Back off before retrying |
 | 7 | `api_changed` | Unexpected status or response shape (including a non-finite number such as `NaN`, which is never written to the JSON output); the API has probably changed |
 
 Requests are sent one at a time with a short delay between them and are never retried
-automatically. The only automatic request is the one-time refresh of an expiring access token
-before a read.
+automatically. The only automatic requests are the refresh of an expiring access token before a
+read: the refresh grant and the identity JWT.
 
 ## MCP server
 
 `vodafone mcp` runs a Model Context Protocol server on stdio, so Claude Code, Codex, Claude Desktop
-and other MCP hosts can read your account as tools, and sign you in from the chat. It needs only
-[uv](https://docs.astral.sh/uv/) (`brew install uv`, or Astral's installer); nothing else has to be
-installed first.
+and other MCP hosts can read your account as tools, and sign you in from the chat. It needs
+[uv](https://docs.astral.sh/uv/) (`brew install uv`, or Astral's installer) and git, which uv uses
+to fetch the package (on macOS, `xcode-select --install` or `brew install git`); nothing else has
+to be installed first.
 
 **Claude Code:**
 
@@ -363,7 +374,10 @@ minimal `PATH`, so give the absolute path of `uvx` (`which uvx`) or of `vodafone
   `vodafone auth login`. Both use the same token file, so signing in with either works for both.
 
 The page works only from your computer, for 10 minutes, and for one sign-in; it loads nothing from
-the internet. Each link carries its own random secret, and only one sign-in runs at a time.
+the internet. Each link carries its own random secret, and only one sign-in runs at a time: asking
+again while one is open gives you the same link. Once a sign-in is over, its old link only shows a
+"link expired" or "signed in" notice. While a sign-in is in progress, `auth_status` reports
+`signed_in: false`.
 
 ### Tools
 
@@ -403,7 +417,7 @@ claude mcp add vodafone -- uv --directory /path/to/vodafone-cli run \
   number from the password grant as the SMS target. If Vodafone changes that flow, sign-in (in the
   CLI and in the MCP server's browser page alike) may break before the data commands do; browser
   token export still works then. A failed refresh, automatic or not, leaves the token file
-  untouched and exits 3.
+  untouched: a refused one exits 3, Vodafone being unavailable exits 5.
 - Sessions last as long as the refresh token, about 90 days, then need a new sign-in with an SMS
   code.
 - Tokens are read from a JSON file; OS keychain storage is planned.

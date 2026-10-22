@@ -3,7 +3,7 @@
 Releases are git tags `vX.Y.Z` on `main`. The version is set once, in `pyproject.toml`; `vodafone
 --version` and the MCP server read it from the installed package metadata.
 
-A release is pinned in three places:
+A release is pinned in four places:
 
 | File | What | When it changes |
 |---|---|---|
