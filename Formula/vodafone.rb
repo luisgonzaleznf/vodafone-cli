@@ -8,7 +8,8 @@ class Vodafone < Formula
   # A git URL, not a tarball: the checkout uses your git credentials, so the formula works the same
   # while the repository is private and once it is public.
   url "https://github.com/luisgonzaleznf/vodafone-cli.git",
-      tag: "v0.1.0"
+      tag:      "v0.1.0",
+      revision: "ebd5f1947a1fb7f684b6f6a36bcf36519d8942fd"
   license "MIT"
   head "https://github.com/luisgonzaleznf/vodafone-cli.git", branch: "main"
 
