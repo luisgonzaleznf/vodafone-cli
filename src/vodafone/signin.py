@@ -179,19 +179,34 @@ class SignIn:
 
     # --- requests ----------------------------------------------------------------------------
 
+    @property
+    def bound(self) -> bool:
+        """A step has succeeded, so only the browser holding its cookie may continue."""
+        return self._browser is not None
+
     def admits(self, cookie: str | None) -> bool:
         """Whether this browser may use the sign-in: anyone with the link until a step succeeds,
         then only the browser holding that step's cookie."""
         return self._browser is None or (cookie is not None and hmac.compare_digest(cookie, self._browser))
 
-    def page(self) -> bytes:
-        return self._render()
-
-    def post(self, action: str, form: dict[str, list[str]]) -> tuple[int, bytes, str | None]:
-        """Run one step; returns (status, page, cookie to set)."""
+    def page(self, cookie: str | None) -> tuple[int, bytes]:
+        """The current step's page, for a browser this sign-in admits."""
         with self._steps:
             if not self.active:
-                return 410, _EXPIRED, None
+                return 410, _USED if self.done.is_set() else _EXPIRED
+            if not self.admits(cookie):
+                return 403, _OTHER_BROWSER
+            return 200, self._render()
+
+    def post(self, action: str, form: dict[str, list[str]], cookie: str | None) -> tuple[int, bytes, str | None]:
+        """Run one step; returns (status, page, cookie to set). The browser binding is checked here,
+        under the step lock and after the body was read: a request that passed the early check
+        while the sign-in was unbound, then held back its body, is refused once a step has bound it."""
+        with self._steps:
+            if not self.active:
+                return 410, _USED if self.done.is_set() else _EXPIRED, None
+            if not self.admits(cookie):
+                return 403, _OTHER_BROWSER, None
             if action == "restart":
                 self._restart()
                 return 200, self._render(), None
@@ -358,11 +373,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._reply(410, _USED)
             threading.Thread(target=signin.stop, daemon=True).start()
             return self._reply(410, _EXPIRED)
-        if not signin.admits(self._cookie()):
+        cookie = self._cookie()
+        if not signin.admits(cookie):  # a fast reject; SignIn.page and .post check again under the step lock
             return self._reply(403, _OTHER_BROWSER)
         action = parts[2]
         if not post:
-            return self._reply(200, signin.page()) if action == "" else self._reply(404, _NOT_FOUND)
+            return self._reply(*signin.page(cookie)) if action == "" else self._reply(404, _NOT_FOUND)
 
         if self.headers.get("Origin") != signin.origin:
             return self._reply(403, _FORBIDDEN)
@@ -380,8 +396,7 @@ class _Handler(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True, max_num_fields=8)
         except ValueError:
             return self._reply(400, _REFUSED)
-        status, body, cookie = signin.post(action, form)
-        self._reply(status, body, cookie)
+        self._reply(*signin.post(action, form, cookie))
 
     def _cookie(self) -> str | None:
         # By hand: 127.0.0.1 cookies of other local apps (any port) arrive here too, and one that

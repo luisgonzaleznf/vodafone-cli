@@ -3,6 +3,7 @@ endpoint. All values are synthetic."""
 
 import base64
 import json
+import socket
 import time
 
 import httpx
@@ -259,6 +260,30 @@ def test_once_a_step_succeeds_only_that_browser_can_continue(signin, vodafone):
             assert response.status_code == 403 and LINE not in response.text
 
     assert vodafone["paths"]() == [config.TOKEN_PATH]
+
+
+@pytest.mark.parametrize(("action", "body"), [("send", f"line={LINE}"), ("start", "username=600000002&password=other"), ("restart", "go=1")])
+def test_a_request_held_back_while_unbound_is_refused_once_a_browser_is_bound(signin, vodafone, action, body):
+    # Headers first, while no step has bound the sign-in: the early check lets them through.
+    held = socket.create_connection(("127.0.0.1", signin.port), timeout=10)
+    held.sendall(
+        f"POST /{signin.secret}/{action} HTTP/1.1\r\nHost: {signin.host}\r\nOrigin: {signin.origin}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+    )
+    time.sleep(0.2)
+    with _browser(signin) as browser:
+        assert browser.post(_path(signin, "start"), data={"username": USERNAME, "password": PASSWORD}).status_code == 200
+        assert signin.bound
+        held.sendall(body.encode())  # now the body
+        reply = b""
+        while chunk := held.recv(65536):
+            reply += chunk
+        held.close()
+
+        assert reply.startswith(b"HTTP/1.0 403") and LINE.encode() not in reply
+        assert vodafone["paths"]() == [config.TOKEN_PATH]  # only the bound browser's own step ran
+        page = browser.get(_path(signin))
+        assert page.status_code == 200 and f'value="{LINE}"' in page.text  # its flow is intact
 
 
 def test_steps_out_of_order_are_refused_without_a_request(signin, vodafone):
