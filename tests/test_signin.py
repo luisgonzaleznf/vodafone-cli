@@ -65,7 +65,7 @@ def store(tmp_path):
 def signin(store, vodafone):
     s = SignIn(store)
     yield s
-    s.stop()
+    s.close()
     assert s.closed.wait(5)
 
 
@@ -129,8 +129,8 @@ def test_it_binds_127_0_0_1_on_a_random_port_with_a_long_secret(store, vodafone)
         assert len(first.secret) >= 43 and first.id != first.secret
         assert first.url == f"http://127.0.0.1:{first.port}/{first.secret}/"
     finally:
-        first.stop()
-        second.stop()
+        first.close()
+        second.close()
 
 
 @pytest.mark.parametrize("path", ["/", "/favicon.ico", "/{wrong}/", "/{secret}", "/{prefix}/", "/{secret}x/", "//{secret}/", "/{secret}/nope"])
@@ -213,35 +213,54 @@ def test_every_page_sends_a_strict_policy_and_loads_nothing_external(signin, vod
             assert marker not in page.text
 
 
-def test_it_expires_and_stops_serving(store, vodafone):
-    s = SignIn(store, ttl=0.3)
-    assert s.active
+def _ended(s: SignIn, browser: httpx.Client, text: str) -> None:
+    """An ended sign-in: every request gets the fixed 410 page, with no form, and the port stays
+    bound, so nobody else can take it and receive what a stale tab posts."""
+    for response in (
+        browser.get(_path(s)),
+        browser.get("/"),
+        browser.post(_path(s, "start"), data={"username": USERNAME, "password": PASSWORD}),
+        browser.post(_path(s, "finish"), data={"code": OTP_CODE}),
+    ):
+        assert response.status_code == 410 and text in response.text and "<form" not in response.text
+    squatter = socket.socket()
+    with pytest.raises(OSError):
+        squatter.bind(("127.0.0.1", s.port))
+    squatter.close()
 
+
+def test_it_expires_then_answers_410_and_keeps_its_port(signin, vodafone):
+    s = SignIn(signin.store, ttl=0.3)
+    try:
+        assert s.active
+        assert s.stopped.wait(5) and not s.active and not s.closed.is_set()
+        with _browser(s) as browser:
+            _ended(s, browser, "expired")
+        assert vodafone["requests"] == []
+    finally:
+        s.close()
     assert s.closed.wait(5)
-    assert not s.active
-    with _browser(s) as browser, pytest.raises(httpx.ConnectError):
-        browser.get(_path(s))
-    assert vodafone["requests"] == []
 
 
-def test_a_request_after_the_deadline_gets_expired_and_stops_the_server(signin, vodafone):
+def test_a_request_after_the_deadline_ends_the_sign_in(signin, vodafone):
     signin._deadline = time.monotonic() - 1  # the timer has not fired yet
 
     with _browser(signin) as browser:
         got = browser.post(_path(signin, "start"), data={"username": USERNAME, "password": PASSWORD})
-
-    assert got.status_code == 410 and "expired" in got.text
-    assert signin.closed.wait(5)
+        assert got.status_code == 410 and "expired" in got.text
+        assert signin.stopped.is_set()
+        _ended(signin, browser, "expired")
     assert vodafone["requests"] == []
 
 
 def test_the_link_is_single_use(signin, store, vodafone):
     with _browser(signin) as browser:
         assert "Signed in" in _sign_in(browser, signin).text
+        sent = len(vodafone["requests"])
 
-        assert signin.closed.wait(5)
-        with pytest.raises(httpx.ConnectError):
-            browser.get(_path(signin))
+        assert signin.stopped.is_set()
+        _ended(signin, browser, "has been used")
+    assert len(vodafone["requests"]) == sent
 
 
 def test_once_a_step_succeeds_only_that_browser_can_continue(signin, vodafone):
@@ -392,11 +411,12 @@ def test_the_manager_runs_one_sign_in_at_a_time(store, vodafone):
 
         with _browser(first) as browser:
             _sign_in(browser, first)
-        assert first.closed.wait(5)
+        assert first.stopped.is_set()
 
         second = manager.begin()
-        assert second is not first and second.secret != first.secret
+        assert second is not first and second.secret != first.secret and second.port != first.port
         manager.cancel(second)
-        assert second.closed.wait(5) and manager.find(second.id) is None
+        assert second.stopped.is_set() and manager.find(second.id) is None
     finally:
         manager.close()
+    assert first.closed.wait(5) and second.closed.wait(5)  # close() releases the ended ones too

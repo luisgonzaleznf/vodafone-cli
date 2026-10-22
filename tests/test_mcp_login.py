@@ -239,8 +239,9 @@ async def test_a_declined_elicitation_cancels_the_sign_in(tokens_path, vodafone,
         result = await client.call_tool("login", {})
 
     assert "Sign-in cancelled" in result.content[0].text
-    with pytest.raises(httpx.ConnectError):
-        _sign_in_in_the_browser(seen["params"][0].url)
+    base = seen["params"][0].url.split("/", 3)
+    with httpx.Client(base_url="/".join(base[:3]), trust_env=False) as browser:
+        assert browser.get("/" + base[3]).status_code == 410  # the link is dead
     assert not tokens_path.exists() and vodafone["requests"] == []
 
 

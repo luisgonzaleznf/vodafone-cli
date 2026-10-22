@@ -15,8 +15,10 @@ Security:
 - The password and code travel only in urlencoded POST bodies; a query string is refused, and
   nothing is logged (http.server's request and error logs are silenced).
 - A strict Content-Security-Policy: no scripts, no external resources, one hashed inline style.
-- The page stops serving once the sign-in succeeds or SIGNIN_TTL (10 minutes) passes, and only
-  one sign-in runs at a time (SignInManager).
+- A sign-in ends once it succeeds or SIGNIN_TTL (10 minutes) passes, and only one runs at a time
+  (SignInManager). An ended sign-in answers every request with a fixed 410 page, and keeps its port
+  bound for the life of the process: freed, the port could be bound by another local user, and a
+  stale tab would post the password there.
 - Pages never echo what was typed. They show fixed messages, plus a VodafoneError's own message,
   which names at most an allowlisted OAuth2 error code or numeric ecode, as the CLI shows it.
 """
@@ -127,7 +129,8 @@ class SignIn:
         self.id = secrets.token_urlsafe(16)  # for the MCP host (elicitation id); unrelated to the secret
         self.result: LoginOutput | None = None
         self.done = threading.Event()  # the token set was written
-        self.closed = threading.Event()  # the server stopped serving
+        self.stopped = threading.Event()  # the sign-in ended; the port stays bound
+        self.closed = threading.Event()  # the port was released (close())
         # Vodafone requests run under the MCP server's tool lock, so they never overlap a tool call.
         self._serial = serial or contextlib.nullcontext()
         self._flow = auth.LoginFlow(store)
@@ -138,6 +141,7 @@ class SignIn:
         self._steps = threading.Lock()
         self._stopping = threading.Lock()
         self._stopped = False
+        self._closed = False
         self._deadline = time.monotonic() + ttl
 
         self._httpd = _Server(("127.0.0.1", 0), _Handler)
@@ -167,15 +171,26 @@ class SignIn:
         return max(0, int(self._deadline - time.monotonic()))
 
     def stop(self) -> None:
-        """Stop serving; the link is dead from then on. Safe from any thread except the server's."""
+        """End the sign-in: the link is dead, and every request gets a fixed 410 page. The port stays
+        bound until close()."""
         with self._stopping:
             if self._stopped:
                 return
             self._stopped = True
         self._timer.cancel()
-        self._httpd.shutdown()
-        self._httpd.server_close()  # the port is closed when stop() returns
         self._flow = auth.LoginFlow(self.store)  # drop the first-factor token and cookies
+        self.stopped.set()
+
+    def close(self) -> None:
+        """Stop, and release the port (when the process is done with sign-ins). Safe from any thread
+        except the server's."""
+        self.stop()
+        with self._stopping:
+            if self._closed:
+                return
+            self._closed = True
+        self._httpd.shutdown()
+        self._httpd.server_close()
 
     # --- requests ----------------------------------------------------------------------------
 
@@ -265,7 +280,7 @@ class SignIn:
             return 200, self._render(_failure(exc, "Signing in failed.", code)), None
         self._step = "done"
         self.done.set()
-        threading.Thread(target=self.stop, daemon=True).start()  # after this reply is sent
+        self.stop()
         return 200, self._render(), None
 
     def _render(self, error: str = "") -> bytes:
@@ -304,7 +319,7 @@ class SignIn:
                 f"{_START_OVER}",
                 error,
             )
-        return _notice("Signed in", "Signed in, you can close this tab. The Vodafone tools work now.")
+        return _notice("Signed in", "Signed in, you can close this tab.")
 
 
 def _field(form: dict[str, list[str]], name: str) -> str:
@@ -360,6 +375,9 @@ class _Handler(BaseHTTPRequestHandler):
         signin = self.server.signin
         if self.headers.get("Host") != signin.host:
             return self._reply(400, _BAD_HOST)
+        if signin.stopped.is_set():  # whatever it asks: a stale tab may be posting the password
+            self._discard_body()
+            return self._reply(410, _USED if signin.done.is_set() else _EXPIRED)
         path, query = self.path.partition("?")[::2]
         parts = path.split("/")
         if len(parts) != 3 or parts[0] or not hmac.compare_digest(
@@ -369,10 +387,9 @@ class _Handler(BaseHTTPRequestHandler):
         if query or "?" in self.path:
             return self._reply(400, _REFUSED)
         if not signin.active:
-            if signin.done.is_set():
-                return self._reply(410, _USED)
-            threading.Thread(target=signin.stop, daemon=True).start()
-            return self._reply(410, _EXPIRED)
+            signin.stop()
+            self._discard_body()
+            return self._reply(410, _USED if signin.done.is_set() else _EXPIRED)
         cookie = self._cookie()
         if not signin.admits(cookie):  # a fast reject; SignIn.page and .post check again under the step lock
             return self._reply(403, _OTHER_BROWSER)
@@ -397,6 +414,15 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._reply(400, _REFUSED)
         self._reply(*signin.post(action, form, cookie))
+
+    def _discard_body(self) -> None:
+        """Read and drop a small request body, so the reply isn't cut off by a reset."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if 0 < length <= _MAX_BODY:
+            self.rfile.read(length)
 
     def _cookie(self) -> str | None:
         # By hand: 127.0.0.1 cookies of other local apps (any port) arrive here too, and one that
@@ -433,6 +459,7 @@ class SignInManager:
         self._store, self._ttl, self._serial = store, ttl, serial
         self._lock = threading.Lock()
         self._current: SignIn | None = None
+        self._ended: list[SignIn] = []  # still bound, see SignIn.stop
 
     def begin(self) -> SignIn:
         """The sign-in in progress, or a new one if there is none."""
@@ -441,6 +468,7 @@ class SignInManager:
                 return self._current
             if self._current is not None:
                 self._current.stop()
+                self._ended.append(self._current)
             self._current = SignIn(self._store, ttl=self._ttl, serial=self._serial)
             return self._current
 
@@ -456,12 +484,14 @@ class SignInManager:
             signin.stop()
             if self._current is signin:
                 self._current = None
+                self._ended.append(signin)
 
     def close(self) -> None:
+        """Release every sign-in's port."""
         with self._lock:
-            if self._current is not None:
-                self._current.stop()
-                self._current = None
+            for signin in [*self._ended, *([self._current] if self._current else [])]:
+                signin.close()
+            self._current, self._ended = None, []
 
 
 def open_browser(url: str, timeout: float = 10.0) -> bool:
