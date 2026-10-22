@@ -17,9 +17,9 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from . import config
+from . import auth, config
 from .client import DxlClient, describe_media_type
-from .errors import ApiShapeError, AuthError, UsageError, VodafoneError
+from .errors import ApiShapeError, NotSignedInError, UsageError, VodafoneError
 from .models import (
     Account,
     Balance,
@@ -66,12 +66,13 @@ _BILL_NO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 def run_with_client(tokens_path: Path, fn: Callable[[DxlClient], T]) -> T:
     """Load the token set, open a DxlClient and call `fn` with it.
 
-    The token file is re-read on every call, so a re-exported file is picked up without a restart.
-    Anything other than a VodafoneError is re-raised as one carrying only the exception type, since
-    messages can embed request URLs or headers.
+    The token file is re-read on every call, so a re-exported file or a new sign-in is picked up
+    without a restart, and an access token that has expired or is about to is refreshed first (see
+    auth.ensure_fresh). Anything other than a VodafoneError is re-raised as one carrying only the
+    exception type, since messages can embed request URLs or headers.
     """
     try:
-        tokens = FileTokenStore(tokens_path).load()
+        tokens = auth.ensure_fresh(FileTokenStore(tokens_path))
         with DxlClient(tokens) as client:
             return fn(client)
     except VodafoneError:
@@ -172,8 +173,9 @@ def get_me(client: DxlClient) -> MeOutput:
 def _user_profile(client: DxlClient) -> WireUserProfile:
     claims = client.tokens.claims()
     if not claims:
-        raise AuthError(
-            "the token set has no readable identity JWT (mcare-LocalStore.key.jwt); run `vodafone auth login`"
+        raise NotSignedInError(
+            "the token set has no readable identity JWT (mcare-LocalStore.key.jwt); run `vodafone auth login`",
+            reason="the token file has no readable identity JWT",
         )
     return _parse(WireUserProfile, claims.get("userProfile"), "JWT userProfile")
 

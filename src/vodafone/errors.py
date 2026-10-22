@@ -52,6 +52,16 @@ class AuthError(VodafoneError):
     kind = "auth_expired"
 
 
+class NotSignedInError(AuthError):
+    """No usable session: the token file is missing or unreadable, or the access token expired and
+    cannot be renewed. `message` keeps the CLI's remedy; `reason` says what is wrong in a few words
+    without it, so the MCP server can point at its own sign-in instead."""
+
+    def __init__(self, message: str, *, reason: str, status: int | None = None, transaction_id: str | None = None):
+        super().__init__(message, status=status, transaction_id=transaction_id)
+        self.reason = reason
+
+
 class AccessDeniedError(AuthError):
     """401 while the access token is still valid: the resource/id was refused, not the session."""
 

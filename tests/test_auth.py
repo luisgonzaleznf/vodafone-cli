@@ -1,6 +1,7 @@
 """`auth login` and `auth refresh` against a mock token endpoint. All values are synthetic."""
 
 import base64
+import contextlib
 import json
 import stat
 from datetime import UTC, datetime, timedelta
@@ -473,6 +474,25 @@ def test_a_rejected_code_can_be_retried_and_a_finished_flow_is_spent(login_endpo
     with pytest.raises(AuthError):
         flow.finish(OTP_CODE)
     assert len(login_endpoint["requests"]) == sent
+
+
+def test_the_token_file_is_written_while_holding_its_lock(login_endpoint, tmp_path, monkeypatch):
+    events = []
+    real_lock, real_write = FileTokenStore.lock, FileTokenStore.write
+
+    @contextlib.contextmanager
+    def spy_lock(self):
+        with real_lock(self):
+            events.append("locked")
+            yield
+            events.append("unlocked")
+
+    monkeypatch.setattr(FileTokenStore, "lock", spy_lock)
+    monkeypatch.setattr(FileTokenStore, "write", lambda self, raw: events.append("write") or real_write(self, raw))
+
+    auth.login(_store(tmp_path), USERNAME, PASSWORD, lambda: OTP_CODE)
+
+    assert events == ["locked", "write", "unlocked"]
 
 
 def test_starting_again_discards_the_previous_attempt(login_endpoint, tmp_path):

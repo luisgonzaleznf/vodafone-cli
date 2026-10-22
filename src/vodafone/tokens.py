@@ -4,16 +4,19 @@ an OS keychain backend can replace it later behind the same TokenStore interface
 
 import base64
 import binascii
+import fcntl
 import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from .errors import AuthError
+from .errors import NotSignedInError
 
 # A credential sent in a request header: one run of visible ASCII (no whitespace or control chars).
 HEADER_SAFE = re.compile(r"[!-~]+")
@@ -87,6 +90,27 @@ class FileTokenStore:
     def __init__(self, path: Path):
         self.path = path
 
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.lock")
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Hold an exclusive flock on `<tokens file>.lock` (created empty, mode 0600).
+
+        Taken around every refresh and sign-in write: the CLI and any number of MCP servers can run
+        at once, and the refresh token rotates, so two of them must not spend it together. Readers
+        don't lock (writes are atomic renames). The lock file is never removed, which would let two
+        processes lock different files; the lock goes with the descriptor, also if the process dies.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
     def _atomic_write(self, raw: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # A unique temp file created exclusively with mode 0600 (mkstemp uses O_EXCL): a fixed name
@@ -117,15 +141,25 @@ class FileTokenStore:
         try:
             raw = json.loads(self.path.read_text())
         except FileNotFoundError:
-            raise AuthError(f"token file not found: {self.path}; run `vodafone auth login` (or export it, see README)")
+            raise NotSignedInError(
+                f"token file not found: {self.path}; run `vodafone auth login` (or export it, see README)",
+                reason="there is no token file",
+            )
         except (OSError, ValueError):
-            raise AuthError(f"token file unreadable or not JSON: {self.path}")
+            raise NotSignedInError(
+                f"token file unreadable or not JSON: {self.path}", reason="the token file is unreadable or not JSON"
+            )
         if not isinstance(raw, dict):
-            raise AuthError(f"token file has an unexpected shape: {self.path}")
+            raise NotSignedInError(
+                f"token file has an unexpected shape: {self.path}", reason="the token file has an unexpected shape"
+            )
 
         missing = [k for k in ("accessToken", "userCsrfToken") if not raw.get(k)]
         if missing:
-            raise AuthError(f"token file is missing {', '.join(missing)}: {self.path}; run `vodafone auth login`")
+            raise NotSignedInError(
+                f"token file is missing {', '.join(missing)}: {self.path}; run `vodafone auth login`",
+                reason=f"the token file is missing {', '.join(missing)}",
+            )
 
         jwt = raw.get("jwt")
         if isinstance(jwt, list):  # the export stores it as a one-element list
@@ -137,7 +171,10 @@ class FileTokenStore:
         optional = {"refreshToken": raw.get("refreshToken"), "jwt": jwt}
         invalid += [k for k, v in optional.items() if v is not None and not isinstance(v, str)]
         if invalid:
-            raise AuthError(f"token file has an invalid {', '.join(invalid)}: {self.path}; run `vodafone auth login`")
+            raise NotSignedInError(
+                f"token file has an invalid {', '.join(invalid)}: {self.path}; run `vodafone auth login`",
+                reason=f"the token file has an invalid {', '.join(invalid)}",
+            )
 
         return TokenSet(
             access_token=raw["accessToken"],

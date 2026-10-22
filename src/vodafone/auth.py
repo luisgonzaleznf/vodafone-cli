@@ -3,8 +3,9 @@
 `login` reproduces the web app's sign-in: a password grant, the SMS-OTP second factor sent to one of
 the masked numbers the grant offers, then a fetch of the identity JWT — no browser. `LoginFlow` runs
 the same sign-in one step at a time, for the MCP server's browser page. `refresh`
-exchanges the stored refresh token for a new access token. Both write the token set the rest of the
-CLI reads; neither ever logs a credential or token.
+exchanges the stored refresh token for a new access token, and `ensure_fresh` does so automatically
+before a read when the access token is about to expire. All of them write the token set the rest of
+the CLI reads, under the token file's lock; none ever logs a credential or token.
 """
 
 import base64
@@ -19,7 +20,7 @@ from pydantic import ValidationError
 
 from . import config
 from .client import DxlClient
-from .errors import ApiShapeError, AuthError, VodafoneError
+from .errors import ApiShapeError, AuthError, NotSignedInError, VodafoneError
 from .models import LoginOutput, RefreshOutput, WireTokenResponse
 from .tokens import FileTokenStore, TokenSet
 
@@ -30,6 +31,8 @@ _OTP_HEADERS = {"otpversion": config.OTP_VERSION}
 _EPOCH = re.compile(r"[0-9]{1,12}")
 # A masked phone number as the grant's jws lists it (e.g. 6*****789). Only these are ever shown.
 _MASKED_MSISDN = re.compile(r"[0-9]\*{3,8}[0-9]{2,4}")
+# Reads refresh an access token this close to expiry, so it can't lapse in the middle of a command.
+REFRESH_MARGIN = timedelta(seconds=60)
 
 
 def _iso(dt: datetime) -> str:
@@ -204,7 +207,8 @@ class LoginFlow:
             token_set["refreshTokenExpirationTime"] = _iso(refresh_expires)
         if jwt:
             token_set["jwt"] = [jwt]
-        self.store.write(token_set)
+        with self.store.lock():  # never in the middle of another process's refresh
+            self.store.write(token_set)
         self._reset()  # spent: the first-factor token and cookies are dropped
 
         return LoginOutput(
@@ -239,15 +243,100 @@ def login(
 
 
 def refresh(store: FileTokenStore) -> RefreshOutput:
-    tokens = store.load()
-    if not tokens.refresh_token:
-        raise AuthError(f"the token file has no refreshToken: {store.path}; run `vodafone auth login`")
-    if tokens.is_refresh_expired():
-        raise AuthError(
-            f"the refresh token expired at {_iso(tokens.refresh_expires_at)}; run `vodafone auth login` "
-            "(password + SMS code)"
-        )
+    """`vodafone auth refresh`: exchange the refresh token for a new access token and save the
+    rotated set, under the token file's lock."""
+    with store.lock():
+        tokens = store.load()
+        if not tokens.refresh_token:
+            raise NotSignedInError(
+                f"the token file has no refreshToken: {store.path}; run `vodafone auth login`",
+                reason="the token file has no refresh token",
+            )
+        if tokens.is_refresh_expired():
+            raise NotSignedInError(
+                f"the refresh token expired at {_iso(tokens.refresh_expires_at)}; run `vodafone auth login` "
+                "(password + SMS code)",
+                reason=f"the refresh token expired at {_iso(tokens.refresh_expires_at)}",
+            )
+        return _refresh(store, tokens)
 
+
+def ensure_fresh(store: FileTokenStore) -> TokenSet:
+    """The stored token set, refreshed first if its access token has expired or expires within
+    REFRESH_MARGIN and a refresh token is present and unexpired. Used by every read (CLI and MCP);
+    `auth status` never calls it.
+
+    The refresh runs under the token file's lock, and the file is re-read once the lock is held:
+    if another process refreshed meanwhile, its tokens are used and nothing is sent. A refresh is
+    tried once, never retried. If it fails, or the token set can't be renewed, the error is a
+    NotSignedInError (auth_expired) and the file is left as it was. A token whose expiry is unknown
+    is used as it is.
+    """
+    tokens = store.load()
+    if not _due(tokens):
+        return tokens
+    with store.lock():
+        tokens = store.load()
+        if not _due(tokens):
+            return tokens
+        now = datetime.now(UTC)
+        renewable = tokens.refresh_token is not None and not tokens.is_refresh_expired(now)
+        if not renewable:
+            if not tokens.is_access_expired(now):
+                return tokens  # still valid for under REFRESH_MARGIN, with nothing to renew it
+            raise _not_renewable(store, tokens)
+        try:
+            _refresh(store, tokens)
+        except Exception as exc:
+            raise _refresh_failed(tokens, exc) from None
+        return store.load()
+
+
+def _due(tokens: TokenSet) -> bool:
+    return tokens.is_access_expired(datetime.now(UTC) + REFRESH_MARGIN)
+
+
+def _expiry(tokens: TokenSet) -> str:
+    return f"the access token expired at {_iso(tokens.access_expires_at)}"
+
+
+def _not_renewable(store: FileTokenStore, tokens: TokenSet) -> NotSignedInError:
+    if not tokens.refresh_token:
+        return NotSignedInError(
+            f"{_expiry(tokens)} and the token file has no refreshToken: {store.path}; run `vodafone auth login`",
+            reason=f"{_expiry(tokens)} and there is no refresh token to renew it",
+        )
+    return NotSignedInError(
+        f"{_expiry(tokens)} and the refresh token at {_iso(tokens.refresh_expires_at)}; run `vodafone auth login` "
+        "(password + SMS code)",
+        reason=f"{_expiry(tokens)} and the refresh token at {_iso(tokens.refresh_expires_at)}",
+    )
+
+
+def _refresh_failed(tokens: TokenSet, exc: Exception) -> NotSignedInError:
+    """A failed automatic refresh, reported as not signed in. Only the original error's own
+    (allowlisted) message is carried, or for anything unexpected its type."""
+    if not isinstance(exc, VodafoneError):
+        exc = VodafoneError(f"unexpected internal error: {type(exc).__name__}")
+    status = {"status": exc.status, "transaction_id": exc.transaction_id}
+    if isinstance(exc, AuthError):  # the token endpoint refused the refresh token
+        return NotSignedInError(
+            f"{_expiry(tokens) if tokens.is_access_expired() else 'the access token is about to expire'} and "
+            f"renewing it was refused: {exc.message}; run `vodafone auth login`",
+            reason="Vodafone refused to renew the session",
+            **status,
+        )
+    return NotSignedInError(
+        f"{_expiry(tokens) if tokens.is_access_expired() else 'the access token is about to expire'} and "
+        f"renewing it failed: {exc.message}; try again in a few minutes, or run `vodafone auth login`",
+        reason=f"renewing the session failed ({exc.kind}); try again in a few minutes, or sign in again",
+        **status,
+    )
+
+
+def _refresh(store: FileTokenStore, tokens: TokenSet) -> RefreshOutput:
+    """The refresh-token grant, then the rotated tokens and a new identity JWT saved into the file.
+    The caller holds the lock."""
     with DxlClient(tokens) as client:
         grant = _grant(
             client.post(
