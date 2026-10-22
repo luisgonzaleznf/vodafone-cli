@@ -66,6 +66,8 @@ NOT_SIGNED_IN = (
     "page in the browser (in a terminal, `vodafone auth login`)."
 )
 
+SIGN_IN_IN_PROGRESS = "a browser sign-in is in progress and has not finished yet"
+
 # Seconds `login` waits for the browser sign-in to finish when the host showed the link itself.
 LOGIN_WAIT = 45.0
 _ELICITATION = "vodafone_signin"  # the key of the URL elicitation in an InputRequiredResult
@@ -155,9 +157,12 @@ def build_server(
     def auth_status() -> Annotated[CallToolResult, AuthStatusOutput]:
         """Whether the user is signed in to Vodafone, and when the session expires. Offline: reads the
         local token file only, never contacts Vodafone or refreshes. `vodafone auth status`'s JSON
-        plus signed_in and reason."""
+        plus signed_in and reason; signed_in is false while a browser sign-in is still in progress."""
         try:
-            payload = auth.sign_in_status(store, datetime.now(UTC)).model_dump(mode="json")
+            status = auth.sign_in_status(store, datetime.now(UTC))
+            if signins.live() is not None:  # the token file may change any moment: not settled yet
+                status = status.model_copy(update={"signed_in": False, "reason": SIGN_IN_IN_PROGRESS})
+            payload = status.model_dump(mode="json")
             text = render(payload)
         except VodafoneError as err:
             return _error(err)
@@ -257,5 +262,11 @@ def _signed_in(attempt: signin.SignIn) -> CallToolResult:
     result = attempt.result
     renews = f" and renews itself until {result.refresh_token_expires_at}" if result and result.refresh_token_expires_at else ""
     until = f" The session is valid until {result.access_token_expires_at}{renews}." if result else ""
+    if result is not None and not result.jwt_fetched:
+        return _text(
+            f"Signed in to Vodafone and saved the session.{until} But Vodafone did not return the identity "
+            "token that list_lines, get_usage and list_invoices need, so only get_account works for now. Call "
+            "login again to retry."
+        )
     return _text(f"Signed in to Vodafone.{until} The Vodafone tools work now.")
 

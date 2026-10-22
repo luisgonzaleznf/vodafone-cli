@@ -472,6 +472,11 @@ class SignInManager:
             self._current = SignIn(self._store, ttl=self._ttl, serial=self._serial)
             return self._current, True
 
+    def live(self) -> SignIn | None:
+        """The sign-in in progress, if any."""
+        current = self._current
+        return current if current is not None and current.active else None
+
     def find(self, signin_id: str | None) -> SignIn | None:
         """The current sign-in if its id matches (an id echoed back by the MCP host)."""
         current = self._current

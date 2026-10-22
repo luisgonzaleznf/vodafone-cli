@@ -349,7 +349,10 @@ class AuthStatusOutput(BaseModel):
     Without a readable token file, the token fields are null."""
 
     signed_in: bool = Field(
-        description="True if the read tools can run: the access token is valid, or a refresh token can renew it."
+        description=(
+            "True if the read tools can run: the access token is valid or a refresh token can renew it, the "
+            "identity JWT is readable, and no browser sign-in is in progress."
+        )
     )
     reason: str | None = Field(description="Why the user is not signed in; null when signed in.")
     store: str

@@ -175,7 +175,7 @@ def _user_profile(client: DxlClient) -> WireUserProfile:
     if not claims:
         raise NotSignedInError(
             "the token set has no readable identity JWT (mcare-LocalStore.key.jwt); run `vodafone auth login`",
-            reason="the token file has no readable identity JWT",
+            reason=auth.NO_IDENTITY,
         )
     return _parse(WireUserProfile, claims.get("userProfile"), "JWT userProfile")
 

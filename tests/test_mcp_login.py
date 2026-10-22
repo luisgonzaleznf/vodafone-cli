@@ -46,7 +46,11 @@ def _token_body(access: str) -> dict:
 @pytest.fixture
 def vodafone(monkeypatch):
     """The sign-in and refresh grants (auth.DxlClient) and the account data (api.DxlClient)."""
-    state = {"refresh": (200, _token_body(NEW_ACCESS)), "requests": []}
+    state = {
+        "refresh": (200, _token_body(NEW_ACCESS)),
+        "jwt": httpx.Response(200, json={}, headers={"authorization": "h.eyJ4IjoxfQ.s"}),
+        "requests": [],
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         state["requests"].append(request)
@@ -60,7 +64,7 @@ def vodafone(monkeypatch):
         if path == config.OTP_TOKEN_PATH:
             return httpx.Response(200, json=_token_body(NEW_ACCESS))
         if path == "/v2/subscription/subscriptions/":
-            return httpx.Response(200, json={}, headers={"authorization": "h.eyJ4IjoxfQ.s"})
+            return state["jwt"]
         if path == "/v2/customer/customerAccounts":
             return httpx.Response(200, json={"items": [{"id": ACCOUNT, "status": "Activo"}]})
         if path == f"/v2/customer/customerAccounts/{ACCOUNT}":
@@ -333,9 +337,14 @@ async def test_a_failed_elicitation_falls_back_to_the_browser(tokens_path, vodaf
 # --- auth_status ---------------------------------------------------------------------------------
 
 
-def _write(path, *, access_in, refresh=OLD_REFRESH, refresh_in=timedelta(days=60)):
+IDENTITY = "h.eyJ4IjoxfQ.s"  # a readable identity JWT
+
+
+def _write(path, *, access_in, refresh=OLD_REFRESH, refresh_in=timedelta(days=60), jwt=IDENTITY):
     now = datetime.now(UTC)
     raw = {"accessToken": OLD_ACCESS, "userCsrfToken": CSRF, "accessTokenExpirationTime": (now + access_in).isoformat()}
+    if jwt:
+        raw["jwt"] = [jwt]
     if refresh:
         raw |= {"refreshToken": refresh, "refreshTokenExpirationTime": (now + refresh_in).isoformat()}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +379,51 @@ async def test_auth_status_says_whether_reads_can_run_offline(tokens_path, vodaf
     assert vodafone["requests"] == [] and tokens_path.read_bytes() == before  # offline, never refreshes
     for secret in (OLD_ACCESS, OLD_REFRESH, CSRF):
         assert secret not in result.content[0].text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("jwt", [None, "garbage"])
+async def test_without_a_readable_identity_jwt_auth_status_agrees_with_the_read_tools(tokens_path, vodafone, jwt):
+    _write(tokens_path, access_in=timedelta(hours=1), jwt=jwt)
+
+    async with Client(build_server(tokens_path)) as client:
+        status = (await client.call_tool("auth_status", {})).structured_content
+        lines = _error(await client.call_tool("list_lines", {}))
+
+    assert status["signed_in"] is False and status["reason"] == "the token file has no readable identity JWT"
+    assert lines["message"].startswith(f"Not signed in to Vodafone: {status['reason']}.")
+
+
+@pytest.mark.anyio
+async def test_a_sign_in_without_the_identity_jwt_does_not_claim_the_tools_work(tokens_path, vodafone):
+    vodafone["jwt"] = httpx.Response(500, json={"message": "boom"})
+    seen, callback = _elicitation("accept", sign_in=True)
+
+    async with Client(build_server(tokens_path, login_wait=10), mode="legacy", elicitation_callback=callback) as client:
+        result = (await client.call_tool("login", {})).content[0].text
+        status = (await client.call_tool("auth_status", {})).structured_content
+
+    assert result.startswith("Signed in to Vodafone and saved the session.") and "The Vodafone tools work now" not in result
+    assert "only get_account works" in result
+    assert status["signed_in"] is False and status["reason"] == "the token file has no readable identity JWT"
+
+
+@pytest.mark.anyio
+async def test_auth_status_is_not_signed_in_while_a_sign_in_is_in_progress(tokens_path, vodafone):
+    _write(tokens_path, access_in=timedelta(hours=-1))  # timestamps alone would say renewable
+    vodafone["refresh"] = (400, {"error": "invalid_grant"})  # but Vodafone refuses it
+
+    async with Client(build_server(tokens_path, open_browser=Opener())) as client:
+        assert _error(await client.call_tool("get_account", {}))["type"] == "auth_expired"
+        url = URL.search((await client.call_tool("login", {})).content[0].text).group(0)
+        during = (await client.call_tool("auth_status", {})).structured_content
+        await anyio.to_thread.run_sync(_sign_in_in_the_browser, url)
+        after = (await client.call_tool("auth_status", {})).structured_content
+        account = await client.call_tool("get_account", {})
+
+    assert (during["signed_in"], during["reason"]) == (False, "a browser sign-in is in progress and has not finished yet")
+    assert (after["signed_in"], after["reason"]) == (True, None)
+    assert not account.is_error
 
 
 @pytest.mark.anyio

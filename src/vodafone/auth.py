@@ -43,6 +43,7 @@ _EPOCH = re.compile(r"[0-9]{1,12}")
 _MASKED_MSISDN = re.compile(r"[0-9]\*{3,8}[0-9]{2,4}")
 # Reads refresh an access token this close to expiry, so it can't lapse in the middle of a command.
 REFRESH_MARGIN = timedelta(seconds=60)
+NO_IDENTITY = "the token file has no readable identity JWT"  # lines, usage and invoices need it
 
 
 def _iso(dt: datetime) -> str:
@@ -421,7 +422,10 @@ def _iso_or_none(dt: datetime | None) -> str | None:
 
 def token_status(store: FileTokenStore, now: datetime) -> TokenStatusOutput:
     """`vodafone auth status`: the token set's expiry times. Offline; never refreshes."""
-    tokens = store.load()
+    return _token_status(store, store.load(), now)
+
+
+def _token_status(store: FileTokenStore, tokens: TokenSet, now: datetime) -> TokenStatusOutput:
     access_left = (tokens.access_expires_at - now).total_seconds() if tokens.access_expires_at else None
     refresh_left = (tokens.refresh_expires_at - now).total_seconds() if tokens.refresh_expires_at else None
     return TokenStatusOutput(
@@ -444,20 +448,24 @@ def token_status(store: FileTokenStore, now: datetime) -> TokenStatusOutput:
 
 
 def sign_in_status(store: FileTokenStore, now: datetime) -> AuthStatusOutput:
-    """The MCP server's auth_status: token_status plus whether reads can run, i.e. the access token
-    is valid or a refresh token can renew it. A missing or unreadable token file means not signed
-    in, which is an answer, not an error. Offline; never refreshes."""
+    """The MCP server's auth_status: token_status plus whether the read tools can run, i.e. the
+    access token is valid or a refresh token can renew it, and the identity JWT the line, usage and
+    invoice reads need is readable. A missing or unreadable token file means not signed in, which
+    is an answer, not an error. The reasons are the ones the read tools give. Offline; never
+    refreshes."""
     try:
-        status = token_status(store, now)
+        tokens = store.load()
     except NotSignedInError as err:
         return AuthStatusOutput(
             signed_in=False, reason=err.reason, store="file", tokens_file=str(store.path),
             exported_at=None, access_token=None, refresh_token=None, jwt=None,
         )
+    status = _token_status(store, tokens, now)
     reason = None
-    if status.access_token.expired:
-        if not status.refresh_token.present:
-            reason = "the access token expired and there is no refresh token to renew it"
-        elif status.refresh_token.expired:
-            reason = "the access token and the refresh token have expired"
+    if status.access_token.expired and not status.refresh_token.present:
+        reason = "the access token expired and there is no refresh token to renew it"
+    elif status.access_token.expired and status.refresh_token.expired:
+        reason = "the access token and the refresh token have expired"
+    elif not tokens.claims():
+        reason = NO_IDENTITY
     return AuthStatusOutput(signed_in=reason is None, reason=reason, **dict(status))
