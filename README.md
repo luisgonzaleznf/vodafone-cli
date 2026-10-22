@@ -156,11 +156,11 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
 
 1. `--tokens PATH`
 2. `$VODAFONE_TOKENS_FILE`
-3. `./.local-secrets/tokens.json`, if it exists
-4. When running from a source checkout (`uv run`, or an editable install): `.local-secrets/tokens.json`
-   in the checkout
-5. Otherwise (Homebrew, the install script, `uv tool install`): `~/.config/vodafone-cli/tokens.json`,
-   or `$XDG_CONFIG_HOME/vodafone-cli/tokens.json` when `XDG_CONFIG_HOME` is set
+3. An installed copy (Homebrew, the install script, `uv tool install`):
+   `~/.config/vodafone-cli/tokens.json`, or `$XDG_CONFIG_HOME/vodafone-cli/tokens.json` when
+   `XDG_CONFIG_HOME` is set, whatever directory it runs from
+4. A source checkout (`uv run`, or an editable install): `./.local-secrets/tokens.json` if it exists,
+   else `.local-secrets/tokens.json` in the checkout
 
 `auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
 renamed into place. Run `vodafone auth status` to see when the access token

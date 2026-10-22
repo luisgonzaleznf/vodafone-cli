@@ -30,12 +30,20 @@ def test_the_env_var_wins(env, monkeypatch):
     assert config.default_tokens_path() == env / "home" / "elsewhere.json"
 
 
-def test_a_token_file_in_the_working_directory_is_used(env, monkeypatch):
-    _installed(monkeypatch, env)
+def test_a_source_checkout_prefers_a_token_file_in_the_working_directory(env):
     (env / ".local-secrets").mkdir()
     (env / ".local-secrets" / "tokens.json").write_text("{}")
 
     assert config.default_tokens_path() == env / ".local-secrets" / "tokens.json"
+
+
+def test_an_installed_copy_ignores_a_token_file_in_the_working_directory(env, monkeypatch):
+    # e.g. Homebrew's vodafone run from inside a checkout: login must not write into the checkout.
+    _installed(monkeypatch, env)
+    (env / ".local-secrets").mkdir()
+    (env / ".local-secrets" / "tokens.json").write_text("{}")
+
+    assert config.default_tokens_path() == env / "home" / ".config" / "vodafone-cli" / "tokens.json"
 
 
 def test_a_source_checkout_uses_its_own_local_secrets(env):
