@@ -3,6 +3,7 @@
 import base64
 import json
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 
 import httpx
 import pytest
@@ -78,6 +79,21 @@ def test_injects_headers_with_a_fresh_trace_id_per_request():
     assert h["user-agent"].startswith("Mozilla/5.0")
     assert "cookie" not in h
     assert seen[0].headers["vf-trace-transaction-id"] != seen[1].headers["vf-trace-transaction-id"]
+
+
+@pytest.mark.parametrize("csrf", [CSRF, 'synthetic; injected=value; quote="'])
+def test_auth_posts_pair_the_csrf_cookie_with_the_header_without_injecting_cookies(csrf):
+    seen = []
+    with _client(lambda r: seen.append(r) or _json(200, {})) as client:
+        client.post("/token", data={"grant_type": "password"}, headers={"vf-csrf-token": csrf}, bearer=False)
+        client.post("/otp", json={"code": "123456"}, headers={"vf-csrf-token": csrf})
+        client.get_json("/identity")
+
+    for request in seen[:2]:
+        cookies = SimpleCookie(request.headers.get("cookie", ""))
+        assert set(cookies) == {"csrf-token"}
+        assert cookies["csrf-token"].value == request.headers["vf-csrf-token"] == csrf
+    assert "cookie" not in seen[2].headers
 
 
 def test_401_with_expired_token_means_reexport():

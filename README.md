@@ -9,7 +9,7 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 
 | Command | Description | Status |
 |---|---|---|
-| `vodafone auth login` | Sign in (usuario + password + SMS code) and save the token set | ✅ |
+| `vodafone auth login` | Sign in (usuario + password + SMS code) and save the token set | ⚠️ full live sign-in awaiting owner verification |
 | `vodafone me` | Customer account: status, segment, debt, flags, holder contact | ✅ |
 | `vodafone lines` | Every line (mobile, landline, fibre) with its tariff | ✅ |
 | `vodafone usage` | In-plan allowances (data / voice / SMS) per line | ✅ |
@@ -17,7 +17,7 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 | `vodafone mcp` | Read-only MCP server (stdio) exposing the read commands as tools | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
-| `vodafone auth refresh` | Refresh the access token | ⚠️ refused by the endpoint (see [Limitations](#limitations)) |
+| `vodafone auth refresh` | Refresh the access token | ⚠️ CSRF refusal fixed; successful rotation awaiting live verification (see [Limitations](#limitations)) |
 
 Write actions (add-ons, tariff changes, roaming, …) are out of scope for this release.
 
@@ -40,7 +40,10 @@ To put `vodafone` on your `PATH`, run `uv tool install --editable .`
 
 ## Authentication
 
-### Sign in (recommended)
+### Sign in
+
+Full password + SMS sign-in still needs owner verification. Browser token export below is the
+verified fallback while that check is pending.
 
 ```bash
 vodafone auth login
@@ -54,7 +57,7 @@ is shown (the CLI prints a fixed "code sent" line), and auth errors name only a 
 error code (e.g. `invalid_grant`), never the endpoint's free-text message or headers, which could
 echo what was sent.
 
-### Browser token export (alternative)
+### Browser token export (verified fallback)
 
 If you'd rather not type credentials into the CLI, log in at
 <https://m.vodafone.es/mves/login> and export the web app's `localStorage` values with the
@@ -82,9 +85,10 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
 4. `.local-secrets/tokens.json` in the checkout
 
 `auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
-renamed into place. Run `vodafone auth status` to see when the access token
-expires; while refresh is refused by the endpoint (see [Limitations](#limitations)), run
-`auth login` again when it does. Token values are never printed or logged.
+renamed into place. Run `vodafone auth status` to see when the access token expires.
+`vodafone auth refresh` makes one exchange attempt and saves any rotated tokens. If it returns
+`invalid_grant`, obtain a fresh token set by signing in again or exporting the current browser
+session (see [Limitations](#limitations)). Token values are never printed or logged.
 
 ## Usage
 
@@ -93,6 +97,7 @@ Every command writes JSON to stdout.
 ```bash
 vodafone auth login           # sign in (usuario + password + SMS code); saves the token set
 vodafone auth status          # token expiry; exits 3 if the access token has expired
+vodafone auth refresh         # exchange the refresh token and save any rotated tokens
 vodafone me                   # account details
 vodafone lines                # lines and tariffs (same as `vodafone lines list`)
 vodafone usage                # allowances for every line
@@ -263,12 +268,13 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 
 ## Limitations
 
-- **`auth refresh`** is implemented but currently refused by Vodafone. The standard OAuth2 refresh
-  request (`grant_type=refresh_token` + `refresh_token` + `client_id` + `scope`, with the same
-  headers as the password grant) is answered by the token endpoint with HTTP 403 `access_denied`.
-  The command makes one attempt, leaves the token file untouched on failure, and exits 3. Until the
-  exact refresh request the web app sends near the ~24 h access-token expiry is captured, use
-  `vodafone auth login` again instead (the access token lasts ~24 h).
+- **Native authentication:** the missing `csrf-token` cookie that caused HTTP 403 `access_denied`
+  on both login and refresh has been fixed. Auth requests now pair that cookie with the locally
+  generated or stored `vf-csrf-token`; browser cookies and HTTP/2 are not needed to pass this check.
+  A fake-account password grant now reaches HTTP 401, and the tested stored refresh token returns
+  HTTP 401 `invalid_grant`. Full password + SMS login and successful refresh rotation still need
+  owner verification with current credentials. A refused refresh leaves the token file untouched
+  and exits 3. Browser token export remains the verified fallback.
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.

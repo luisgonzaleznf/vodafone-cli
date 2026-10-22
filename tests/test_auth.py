@@ -4,6 +4,7 @@ import base64
 import json
 import stat
 from datetime import UTC, datetime, timedelta
+from http.cookies import SimpleCookie
 from urllib.parse import parse_qsl
 
 import httpx
@@ -103,6 +104,11 @@ def test_login_runs_password_grant_then_otp_then_jwt(login_endpoint, tmp_path):
     csrf = grant.headers["vf-csrf-token"]
     assert len(csrf) == 36 and csrf.count("-") == 4  # client-minted UUID
     assert all(r.headers.get("vf-csrf-token") == csrf for r in reqs)  # same csrf throughout
+    for request in reqs[:3]:  # password grant and both OTP POSTs
+        cookies = SimpleCookie(request.headers.get("cookie", ""))
+        assert set(cookies) == {"csrf-token"}
+        assert cookies["csrf-token"].value == csrf
+    assert "cookie" not in reqs[3].headers  # the identity GET needs no CSRF cookie
 
     authorize = reqs[1]
     assert json.loads(authorize.content) == {"response_type": "code", "login_hint": USERNAME}
@@ -362,6 +368,9 @@ def test_refresh_sends_grant_with_scope_and_recaptcha_header(tokens_file, refres
     }
     assert grant.headers["recaptcha_enterprise"] == "true"
     assert grant.headers["vf-csrf-token"] == CSRF
+    cookies = SimpleCookie(grant.headers.get("cookie", ""))
+    assert set(cookies) == {"csrf-token"}
+    assert cookies["csrf-token"].value == CSRF
     assert "authorization" not in grant.headers
 
 

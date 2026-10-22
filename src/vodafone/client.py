@@ -1,7 +1,7 @@
 """DxlClient: a plain httpx client for api.dxl.local.vodafone.es.
 
-Authenticated DXL calls need only the bearer + vf-* headers and a browser User-Agent; no cookies
-(in particular no Imperva reese84 token). Requests are issued one at a time with a minimum
+Data GETs need the bearer + vf-* headers and a browser User-Agent. Auth POSTs also need a
+csrf-token cookie matching vf-csrf-token. Requests are issued one at a time with a minimum
 spacing, and nothing is retried automatically: on a block, rate limit or stall we stop and report.
 """
 
@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from datetime import UTC
+from http.cookies import SimpleCookie
 from typing import Any
 
 import httpx
@@ -124,6 +125,11 @@ class DxlClient:
         self._pace()
         extra = {"origin": config.WEB_ORIGIN, "referer": f"{config.WEB_ORIGIN}/", **(headers or {})}
         request_headers = {**self._headers(bearer=bearer), **extra}
+        # The auth endpoints compare the CSRF cookie and header before checking the grant.
+        # Keep this request-local, and serialize it so token-file values cannot inject cookies.
+        csrf_cookie = SimpleCookie()
+        csrf_cookie["csrf-token"] = request_headers["vf-csrf-token"]
+        request_headers["cookie"] = csrf_cookie.output(header="").strip()
         if data is not None:
             request_headers["content-type"] = "application/x-www-form-urlencoded"
         try:
