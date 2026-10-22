@@ -1,8 +1,10 @@
 """DxlClient: a plain httpx client for api.dxl.local.vodafone.es.
 
 Data GETs need the bearer + vf-* headers and a browser User-Agent. Auth POSTs also need a
-csrf-token cookie matching vf-csrf-token. Requests are issued one at a time with a minimum
-spacing, and nothing is retried automatically: on a block, rate limit or stall we stop and report.
+csrf-token cookie matching vf-csrf-token, plus the cookies the server set earlier in the flow (such
+as the OTP challenge's JSESSIONID), which the client's cookie jar keeps. Requests are issued one at
+a time with a minimum spacing, and nothing is retried automatically: on a block, rate limit or
+stall we stop and report.
 """
 
 import math
@@ -10,7 +12,6 @@ import re
 import time
 import uuid
 from datetime import UTC
-from http.cookies import SimpleCookie
 from typing import Any
 
 import httpx
@@ -38,6 +39,9 @@ _OAUTH_ERRORS = {
     "access_denied": "access denied",
 }
 _RETRY_AFTER = re.compile(r"[0-9]{1,4}")
+# vf-csrf-token is sent as a cookie too: only a plain token can go there unquoted and still match.
+_CSRF_TOKEN = re.compile(r"[A-Za-z0-9-]{1,128}")
+_ECODE = re.compile(r"[0-9]{1,5}")  # DXL's numeric error code, e.g. 1007
 # Fixed labels for a response's media type: the raw content-type header is never echoed.
 _MEDIA_TYPES = (("json", "JSON"), ("html", "HTML"), ("pdf", "PDF"), ("xml", "XML"), ("text/plain", "plain text"))
 
@@ -51,11 +55,14 @@ class DxlClient:
         spacing: float = config.REQUEST_SPACING,
         timeout: float = config.REQUEST_TIMEOUT,
         transport: httpx.BaseTransport | None = None,
+        cookies: httpx.Cookies | None = None,
     ):
         self._tokens = tokens
         self._spacing = spacing
         self._last_request: float | None = None
-        self._http = httpx.Client(base_url=base_url, timeout=timeout, transport=transport, follow_redirects=False)
+        self._http = httpx.Client(
+            base_url=base_url, timeout=timeout, transport=transport, cookies=cookies, follow_redirects=False
+        )
 
     def __enter__(self) -> "DxlClient":
         return self
@@ -69,6 +76,11 @@ class DxlClient:
     @property
     def tokens(self) -> TokenSet:
         return self._tokens
+
+    @property
+    def cookies(self) -> httpx.Cookies:
+        """The cookies the server has set, to carry on to the next client of a multi-step login."""
+        return self._http.cookies
 
     def _headers(self, *, bearer: bool = True) -> dict[str, str]:
         auth = {"authorization": f"Bearer {self._tokens.access_token}"} if bearer and self._tokens.access_token else {}
@@ -122,18 +134,22 @@ class DxlClient:
         a per-resource denial. Errors name at most an allowlisted OAuth2 error code: these endpoints'
         messages can echo the username, password, OTP code or tokens that were sent.
         """
-        self._pace()
         extra = {"origin": config.WEB_ORIGIN, "referer": f"{config.WEB_ORIGIN}/", **(headers or {})}
         request_headers = {**self._headers(bearer=bearer), **extra}
-        # The auth endpoints compare the CSRF cookie and header before checking the grant.
-        # Keep this request-local, and serialize it so token-file values cannot inject cookies.
-        csrf_cookie = SimpleCookie()
-        csrf_cookie["csrf-token"] = request_headers["vf-csrf-token"]
-        request_headers["cookie"] = csrf_cookie.output(header="").strip()
+        # The auth endpoints compare a csrf-token cookie with the header before checking the grant.
+        csrf = request_headers["vf-csrf-token"]
+        if not _CSRF_TOKEN.fullmatch(csrf):
+            raise AuthError("the CSRF token is not a plain token (letters, digits, '-'); run `vodafone auth login`")
         if data is not None:
             request_headers["content-type"] = "application/x-www-form-urlencoded"
+        self._pace()
         try:
-            response = self._http.post(path, data=data, json=json, headers=request_headers)
+            # build_request adds the jar's cookies (path-matched); the CSRF cookie is added per
+            # request, so it never lands in the jar or on a GET.
+            request = self._http.build_request("POST", path, data=data, json=json, headers=request_headers)
+            jar = request.headers.get("cookie")
+            request.headers["cookie"] = f"{jar}; csrf-token={csrf}" if jar else f"csrf-token={csrf}"
+            response = self._http.send(request)
         except httpx.TimeoutException:
             raise UpstreamError(f"POST {path} timed out; the backend may be stalled, wait before retrying")
         except httpx.HTTPError as exc:
@@ -290,8 +306,8 @@ def _upstream_detail(response: httpx.Response, secrets: frozenset[str], *, free_
     """Read either DXL error shape: {message, description, error} or csm-api's {code, reason,
     message, status}.
 
-    With free_text=False (the auth endpoints) the detail is only an allowlisted OAuth2 error code;
-    otherwise any of `secrets` in it is masked.
+    With free_text=False (the auth endpoints) the detail is only an allowlisted OAuth2 error code
+    and DXL's numeric `ecode`; otherwise any of `secrets` in it is masked.
     """
     try:
         body = response.json()
@@ -300,8 +316,14 @@ def _upstream_detail(response: httpx.Response, secrets: frozenset[str], *, free_
     if not isinstance(body, dict):
         return ""
     if not free_text:
+        parts = []
         code = body.get("error")
-        return f"{code} ({_OAUTH_ERRORS[code]})" if isinstance(code, str) and code in _OAUTH_ERRORS else ""
+        if isinstance(code, str) and code in _OAUTH_ERRORS:
+            parts.append(f"{code} ({_OAUTH_ERRORS[code]})")
+        ecode = str(body.get("ecode", ""))
+        if _ECODE.fullmatch(ecode) and ecode not in secrets:
+            parts.append(f"ecode {ecode}")
+        return ", ".join(parts)
     message = (
         body.get("description")
         or body.get("error_description")  # OAuth2 token-endpoint errors

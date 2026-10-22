@@ -4,7 +4,6 @@ import base64
 import json
 import stat
 from datetime import UTC, datetime, timedelta
-from http.cookies import SimpleCookie
 from urllib.parse import parse_qsl
 
 import httpx
@@ -33,6 +32,12 @@ def _jwt(marker: str) -> str:
 
 
 OLD_JWT, NEW_JWT = _jwt("old"), _jwt("new")
+LINE, LINE_2 = "6*****001", "7*****002"  # masked numbers, as the password grant's jws lists them
+
+
+def _jws(claims: dict) -> str:
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+    return f"{enc({'alg': 'RS256'})}.{enc({'iss': 'VodafoneDXL', 'mailList': [], **claims})}.sig"
 
 
 def _token_body(access: str, *, refresh: str | None = NEW_REFRESH) -> dict:
@@ -55,10 +60,12 @@ def _token_body(access: str, *, refresh: str | None = NEW_REFRESH) -> dict:
 def login_endpoint(monkeypatch):
     """Mock the full login flow. Tweak state to change responses; inspect captured requests."""
     state = {
-        "password_grant": (200, _token_body(FF_ACCESS)),
+        "password_grant": (200, {**_token_body(FF_ACCESS), "jws": _jws({"msisdnList": [LINE]})}),
         "authorize": (202, {"message": "Te hemos enviado un SMS al 6XX XXX X01"}),
         "otp_token": (200, _token_body(NEW_ACCESS)),
         "jwt": httpx.Response(200, json={}, headers={"authorization": NEW_JWT}),
+        # Cookies the real flow sets: Imperva's on the grant, the OTP session on the challenge.
+        "set_cookie": {"password_grant": "visid_incap_1=v1; Path=/", "authorize": "JSESSIONID=sess-1; Path=/"},
         "requests": [],
     }
 
@@ -74,12 +81,15 @@ def login_endpoint(monkeypatch):
             if isinstance(reply, httpx.Response):  # a raw reply, e.g. a non-JSON body
                 return reply
             status, body = reply
-            return httpx.Response(status, json=body)
+            cookie = state["set_cookie"].get(route)
+            return httpx.Response(status, json=body, headers={"set-cookie": cookie} if cookie else None)
         if request.url.path == "/v2/subscription/subscriptions/":
             return state["jwt"]
         raise AssertionError(f"unexpected request {request.url.path}")
 
-    monkeypatch.setattr(auth, "DxlClient", lambda tokens: DxlClient(tokens, spacing=0, transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(
+        auth, "DxlClient", lambda tokens, **kw: DxlClient(tokens, spacing=0, transport=httpx.MockTransport(handler), **kw)
+    )
     return state
 
 
@@ -104,14 +114,17 @@ def test_login_runs_password_grant_then_otp_then_jwt(login_endpoint, tmp_path):
     csrf = grant.headers["vf-csrf-token"]
     assert len(csrf) == 36 and csrf.count("-") == 4  # client-minted UUID
     assert all(r.headers.get("vf-csrf-token") == csrf for r in reqs)  # same csrf throughout
-    for request in reqs[:3]:  # password grant and both OTP POSTs
-        cookies = SimpleCookie(request.headers.get("cookie", ""))
-        assert set(cookies) == {"csrf-token"}
-        assert cookies["csrf-token"].value == csrf
-    assert "cookie" not in reqs[3].headers  # the identity GET needs no CSRF cookie
+    # Each POST pairs a CSRF cookie with the header, after the cookies set so far: the OTP token step
+    # must carry the challenge's JSESSIONID. The identity GET gets the jar but no CSRF cookie.
+    assert [r.headers.get("cookie") for r in reqs] == [
+        f"csrf-token={csrf}",
+        f"visid_incap_1=v1; csrf-token={csrf}",
+        f"visid_incap_1=v1; JSESSIONID=sess-1; csrf-token={csrf}",
+        "visid_incap_1=v1; JSESSIONID=sess-1",
+    ]
 
     authorize = reqs[1]
-    assert json.loads(authorize.content) == {"response_type": "code", "login_hint": USERNAME}
+    assert json.loads(authorize.content) == {"response_type": "code", "login_hint": LINE}
     assert authorize.headers["otpversion"] == config.OTP_VERSION
     assert authorize.headers["authorization"] == f"Bearer {FF_ACCESS}"  # first-factor bearer
 
@@ -122,6 +135,31 @@ def test_login_runs_password_grant_then_otp_then_jwt(login_endpoint, tmp_path):
 
     assert out.jwt_fetched is True
     assert out.access_token_expires_at == "2030-01-02T03:04:05.000Z"
+
+
+def test_login_lets_the_user_choose_among_several_masked_lines(login_endpoint, tmp_path):
+    login_endpoint["password_grant"] = (200, {**_token_body(FF_ACCESS), "jws": _jws({"msisdnList": [LINE, LINE_2]})})
+    offered = []
+
+    auth.login(_store(tmp_path), USERNAME, PASSWORD, lambda: OTP_CODE, lambda lines: offered.append(lines) or LINE_2)
+
+    assert offered == [[LINE, LINE_2]]
+    assert json.loads(login_endpoint["requests"][1].content)["login_hint"] == LINE_2
+
+
+@pytest.mark.parametrize("jws", [None, "not-a-jwt", _jws({}), _jws({"msisdnList": [USERNAME, "6*****"]})])
+def test_login_stops_before_the_sms_without_a_masked_line(login_endpoint, tmp_path, jws):
+    body = _token_body(FF_ACCESS)
+    if jws:
+        body["jws"] = jws
+    login_endpoint["password_grant"] = (200, body)
+    store = _store(tmp_path)
+
+    with pytest.raises(ApiShapeError, match="no phone number"):
+        auth.login(store, USERNAME, PASSWORD, lambda: pytest.fail("no SMS was sent"))
+
+    assert [r.url.path for r in login_endpoint["requests"]] == [config.TOKEN_PATH]
+    assert not store.path.exists()
 
 
 def test_login_writes_a_fresh_token_file_the_cli_can_load(login_endpoint, tmp_path):
@@ -218,7 +256,7 @@ def test_auth_errors_never_echo_credentials_or_tokens(login_endpoint, tmp_path, 
     csrf = login_endpoint["requests"][0].headers["vf-csrf-token"]
     for secret in (USERNAME, PASSWORD, OTP_CODE, FF_ACCESS, csrf, "username=", "password="):
         assert secret not in result.stderr
-    for secret in (PASSWORD, OTP_CODE, FF_ACCESS, csrf):  # stdout only carries the echoed username
+    for secret in (PASSWORD, FF_ACCESS, csrf):  # stdout only carries the echoed username and SMS code
         assert secret not in result.output
     assert not store.path.exists()
 
@@ -301,6 +339,19 @@ def test_login_still_succeeds_when_the_jwt_fetch_fails(login_endpoint, tmp_path)
     assert out.jwt_fetched is False
 
 
+def test_login_cli_lists_the_masked_lines_and_asks_which(login_endpoint, tmp_path):
+    login_endpoint["password_grant"] = (200, {**_token_body(FF_ACCESS), "jws": _jws({"msisdnList": [LINE, LINE_2]})})
+    store = _store(tmp_path)
+    result = CliRunner().invoke(
+        cli.app, ["--tokens", str(store.path), "auth", "login"], input=f"{USERNAME}\n{PASSWORD}\n3\n2\n{OTP_CODE}\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"1. {LINE}" in result.stderr and f"2. {LINE_2}" in result.stderr
+    assert "Elige un número del 1 al 2." in result.stderr  # 3 is out of range: asked again
+    assert json.loads(login_endpoint["requests"][1].content)["login_hint"] == LINE_2
+
+
 def test_login_cli_prompts_and_hides_secrets(login_endpoint, tmp_path):
     store = _store(tmp_path)
     result = CliRunner().invoke(
@@ -314,10 +365,31 @@ def test_login_cli_prompts_and_hides_secrets(login_endpoint, tmp_path):
     assert payload["jwt_fetched"] is True
     assert "Te hemos enviado un código por SMS." in result.stderr
     assert "6XX XXX X01" not in result.output  # no text from the server's challenge
-    # The password and SMS code are hidden (never echoed) and no token value is ever printed.
+    # The password is hidden (never echoed) and no token value is ever printed. The single-use SMS
+    # code is shown as typed: CliRunner's echo of the inputs is the username and the code only.
+    assert result.stdout[: result.stdout.index("{")].split() == [USERNAME, OTP_CODE]
     csrf = login_endpoint["requests"][0].headers["vf-csrf-token"]
-    for secret in (PASSWORD, OTP_CODE, FF_ACCESS, NEW_ACCESS, NEW_REFRESH, NEW_JWT, csrf):
+    for secret in (PASSWORD, FF_ACCESS, NEW_ACCESS, NEW_REFRESH, NEW_JWT, csrf):
         assert secret not in result.output
+
+
+@pytest.mark.parametrize(
+    ("keys", "picked"),
+    [
+        (["\r"], 0),  # Enter keeps the first line
+        (["\x1b[B", "\r"], 1),  # ↓
+        (["\x1b[A", "\r"], 2),  # ↑ from the first wraps to the last
+        (["3", "\x1b[A", "\n"], 1),  # a digit jumps, then ↑
+        (["x", "9", "\x1bOB", "\r"], 1),  # unknown keys and out-of-range digits are ignored
+    ],
+)
+def test_the_line_menu_follows_arrow_keys_and_digits_on_a_terminal(monkeypatch, keys, picked):
+    pressed = iter(keys)
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli.typer, "getchar", lambda: next(pressed))
+
+    assert cli._choose("¿A qué línea?", [LINE, LINE_2, "6*****003"]) == picked
+    assert next(pressed, None) is None  # Enter ended the menu: no key left unread
 
 
 # --- refresh -------------------------------------------------------------------------------------
@@ -354,7 +426,9 @@ def refresh_endpoint(monkeypatch):
             return state["jwt"]
         raise AssertionError(f"unexpected request {request.url.path}")
 
-    monkeypatch.setattr(auth, "DxlClient", lambda tokens: DxlClient(tokens, spacing=0, transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(
+        auth, "DxlClient", lambda tokens, **kw: DxlClient(tokens, spacing=0, transport=httpx.MockTransport(handler), **kw)
+    )
     return state
 
 
@@ -368,9 +442,7 @@ def test_refresh_sends_grant_with_scope_and_recaptcha_header(tokens_file, refres
     }
     assert grant.headers["recaptcha_enterprise"] == "true"
     assert grant.headers["vf-csrf-token"] == CSRF
-    cookies = SimpleCookie(grant.headers.get("cookie", ""))
-    assert set(cookies) == {"csrf-token"}
-    assert cookies["csrf-token"].value == CSRF
+    assert grant.headers["cookie"] == f"csrf-token={CSRF}"
     assert "authorization" not in grant.headers
 
 

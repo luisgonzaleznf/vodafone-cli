@@ -2,6 +2,7 @@
 codes 2 (usage), 3 (auth), 5 (blocked/upstream) and 7 (API changed).
 """
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -65,6 +66,45 @@ def _emit(produce: Callable[[], Any]) -> Any:
 def _run(ctx: typer.Context, fn: Callable[[DxlClient], BaseModel]) -> None:
     state: State = ctx.obj
     _emit(lambda: api.run_with_client(state.tokens_path, fn).model_dump(mode="json"))
+
+
+_KEYS_UP = ("\x1b[A", "\x1bOA", "\xe0H", "k")  # arrow keys (ANSI, application mode, Windows), vi
+_KEYS_DOWN = ("\x1b[B", "\x1bOB", "\xe0P", "j")
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _choose(title: str, options: list[str]) -> int:
+    """The index of the option picked. On a terminal, an arrow-key menu (↑/↓ or a digit, Enter to
+    confirm); otherwise (pipes, tests) a numbered prompt."""
+    if not _interactive():
+        typer.echo(title, err=True)
+        for number, option in enumerate(options, 1):
+            typer.echo(f"  {number}. {option}", err=True)
+        while not 1 <= (pick := typer.prompt("Línea", type=int, default=1, err=True)) <= len(options):
+            typer.echo(f"Elige un número del 1 al {len(options)}.", err=True)
+        return pick - 1
+    typer.echo(f"{title} ↑/↓ y Enter", err=True)
+    current = 0
+    while True:
+        for i, option in enumerate(options):
+            row = typer.style(f"❯ {option}", fg="cyan", bold=True) if i == current else f"  {option}"
+            typer.echo(f"\x1b[2K{row}", err=True)
+        try:
+            key = typer.getchar()  # Ctrl-C raises KeyboardInterrupt, which aborts as for any prompt
+        except EOFError:
+            raise typer.Abort() from None
+        if key in ("\r", "\n"):
+            return current
+        if key in _KEYS_UP:
+            current = (current - 1) % len(options)
+        elif key in _KEYS_DOWN:
+            current = (current + 1) % len(options)
+        elif key.isdigit() and 1 <= int(key) <= len(options):
+            current = int(key) - 1
+        typer.echo(f"\x1b[{len(options)}A", err=True, nl=False)  # back up to redraw the menu
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -168,12 +208,16 @@ def auth_login(ctx: typer.Context) -> None:
     username = typer.prompt("Usuario (móvil o email)", err=True)
     password = typer.prompt("Contraseña", hide_input=True, err=True)
 
+    def choose_line(lines: list[str]) -> str:
+        # Masked numbers (e.g. 6*****789) from the grant's claims, validated as such: no server text.
+        return lines[_choose("¿A qué línea enviamos el código SMS? (se envía al elegirla)", lines)]
+
     def request_code() -> str:
         typer.echo("Te hemos enviado un código por SMS.", err=True)  # fixed text: none from the server
-        return typer.prompt("Código SMS", hide_input=True, err=True)  # a live second factor: never echoed
+        return typer.prompt("Código SMS", err=True)  # shown as typed: single-use, already on the phone
 
     store = FileTokenStore(ctx.obj.tokens_path)
-    _emit(lambda: auth.login(store, username, password, request_code).model_dump(mode="json"))
+    _emit(lambda: auth.login(store, username, password, request_code, choose_line).model_dump(mode="json"))
 
 
 @auth_app.command("refresh")
