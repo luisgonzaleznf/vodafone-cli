@@ -49,23 +49,7 @@ class WireAccountDetail(Wire):
     msisdn: str | None = None
 
 
-# --- /v2/customer/customerAccounts/{id}/billingAccounts ----------------------------------------
-
-
-class WireBillingUser(Wire):
-    nif: str | None = None  # account holder; the TMF678 relatedParty id. Never printed.
-
-
-class WireBillingAccount(Wire):
-    id: str
-
-
-class WireBillingAccounts(Wire):
-    user: WireBillingUser | None = None
-    items: list[WireBillingAccount]
-
-
-# --- identity JWT claims: userProfile.services[] (the line inventory) --------------------------
+# --- identity JWT claims: userProfile (line inventory, identity document) ----------------------
 
 
 class WireService(Wire):
@@ -75,8 +59,13 @@ class WireService(Wire):
     customerAccountId: str | None = None
 
 
+class WireIdentityDocument(Wire):
+    id: str  # the logged-in user's document; the TMF678 relatedParty id. Never printed.
+
+
 class WireUserProfile(Wire):
     services: list[WireService]
+    document: WireIdentityDocument | None = None
 
 
 # --- /v2/product/tariffs?customerAccountId&subscriptionId --------------------------------------
@@ -151,6 +140,43 @@ class WireBill(Wire):
     status: str | None = None
     details: WireBillDetails | None = None
     amountsDue: WireAmountsDue | None = None
+
+
+# --- /v3/payment/customerBills?type=bill (bill documents with their PDF download links) --------
+
+
+class WireLink(Wire):
+    href: str | None = None
+
+
+class WireDocumentLinks(Wire):
+    download: WireLink | None = None
+
+
+class WireBillDocument(Wire):
+    links: WireDocumentLinks | None = None
+
+
+class WireBillingCycle(Wire):
+    billingYear: str | None = None
+    billingMonth: str | None = None
+
+
+class WireBillingAccountRef(Wire):
+    id: str | None = None
+
+
+class WireBillDocumentsItem(Wire):
+    billNo: str  # same value as the TMF678 bill id.value
+    creationDate: str | None = None
+    status: str | None = None
+    billingCycle: WireBillingCycle | None = None
+    billingAccount: WireBillingAccountRef | None = None
+    documents: list[WireBillDocument] = []
+
+
+class WireBillDocuments(Wire):
+    items: list[WireBillDocumentsItem]
 
 
 # --- CLI output ----------------------------------------------------------------------------------
@@ -246,3 +272,17 @@ class Invoice(BaseModel):
 class InvoicesOutput(BaseModel):
     account_id: str
     invoices: list[Invoice]
+
+
+class InvoiceFile(BaseModel):
+    id: str  # bill number, the same id `invoices list` prints
+    month: str | None  # YYYY-MM billing month
+    file: str
+    bytes: int
+    status: str  # downloaded | skipped (file already existed)
+
+
+class DownloadOutput(BaseModel):
+    account_id: str
+    directory: str
+    invoices: list[InvoiceFile]

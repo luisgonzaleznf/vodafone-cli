@@ -113,16 +113,12 @@ def invoices_list(ctx: typer.Context) -> None:
 
 @invoices_app.command("download")
 def invoices_download(
-    target: Annotated[str, typer.Argument(help="Invoice id, 'latest' or 'all'.")] = "latest",
-    dir: Annotated[Path, typer.Option(help="Output directory.")] = Path("."),
+    ctx: typer.Context,
+    target: Annotated[str, typer.Argument(help="Invoice id (from `invoices list`), 'latest' or 'all'.")] = "latest",
+    directory: Annotated[Path, typer.Option("--dir", help="Output directory (created if missing).")] = Path("."),
 ) -> None:
-    """Not implemented yet: needs the bill's download-hash field captured."""
-    _fail(
-        NotCapturedError(
-            "invoices download is deferred: the field carrying each bill's /v2/download/{hash} token "
-            "has not been confirmed yet (see README, Limitations)"
-        )
-    )
+    """Save invoice PDFs as factura_YYYY-MM.pdf, one at a time. Existing files are skipped."""
+    _run(ctx, lambda client: api.download_invoices(client, target, directory, ctx.obj.account))
 
 
 @auth_app.command("status")
@@ -166,12 +162,13 @@ def auth_status(ctx: typer.Context) -> None:
 
 @auth_app.command("refresh")
 def auth_refresh() -> None:
-    """Not implemented yet: needs the refresh-grant request captured from a login HAR."""
+    """Not implemented yet: the web app's refresh request has not been captured."""
     _fail(
         NotCapturedError(
-            "auth refresh is deferred: the grant_type=refresh_token request to "
-            "/v1/apixoauth2password/oauth2/token has not been captured yet (see README, Limitations); "
-            "until then re-export .local-secrets/tokens.json from a logged-in browser"
+            "auth refresh is not implemented: the web app's refresh request has not been captured, and the "
+            "standard OAuth2 refresh body (grant_type=refresh_token, refresh_token, client_id) was refused by "
+            "the token endpoint with HTTP 403 (see README, Limitations); re-export "
+            ".local-secrets/tokens.json from a logged-in browser instead"
         )
     )
 

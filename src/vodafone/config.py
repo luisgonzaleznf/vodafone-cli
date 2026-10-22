@@ -17,6 +17,8 @@ ACCEPT_LANGUAGE = "es-ES,es;q=0.9"
 REQUEST_TIMEOUT = 25.0
 # Minimum gap between consecutive requests; every command issues its calls one at a time.
 REQUEST_SPACING = 0.4
+# Gap between invoice PDF downloads: a burst of ~12 stalled the download backend.
+DOWNLOAD_SPACING = 2.0
 
 TOKENS_FILE_ENV = "VODAFONE_TOKENS_FILE"
 TOKENS_FILE_RELATIVE = Path(".local-secrets") / "tokens.json"

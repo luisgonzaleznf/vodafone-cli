@@ -29,8 +29,8 @@ def test_unexpected_exception_is_sanitized_json(tmp_path, monkeypatch):
     assert SECRET not in result.output and "00000000T" not in result.output
 
 
-def test_deferred_commands_exit_2(tmp_path):
-    for args in (["auth", "refresh"], ["invoices", "download", "latest"]):
-        result = CliRunner().invoke(cli.app, ["--tokens", str(_tokens_file(tmp_path)), *args])
-        assert result.exit_code == 2
-        assert json.loads(result.stderr)["error"]["type"] == "not_implemented"
+def test_auth_refresh_is_still_a_stub(tmp_path):
+    result = CliRunner().invoke(cli.app, ["--tokens", str(_tokens_file(tmp_path)), "auth", "refresh"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stderr)["error"]["type"] == "not_implemented"

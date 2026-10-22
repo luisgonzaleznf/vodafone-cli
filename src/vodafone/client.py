@@ -71,26 +71,47 @@ class DxlClient:
             if wait > 0:
                 time.sleep(wait)
 
-    def get_json(self, path: str, params: dict[str, str] | None = None) -> Any:
+    def get_json(
+        self, path: str, params: dict[str, str] | None = None, *, headers: dict[str, str] | None = None
+    ) -> Any:
         """GET `path` (no query string; pass `params`) and return the decoded JSON body."""
+        response = self._get(path, params, headers, label=path)
+        try:
+            return response.json()
+        except ValueError:
+            content_type = response.headers.get("content-type", "")
+            raise ApiShapeError(
+                f"GET {path} returned HTTP {response.status_code} with a non-JSON body ({content_type})",
+                status=response.status_code,
+            )
+
+    def get_bytes(self, path: str, *, label: str) -> tuple[bytes, str]:
+        """GET `path` and return (body, content-type). `label` replaces the path in error messages,
+        for paths that embed a download token."""
+        response = self._get(path, None, None, label=label)
+        return response.content, response.headers.get("content-type", "")
+
+    def _get(
+        self, path: str, params: dict[str, str] | None, headers: dict[str, str] | None, *, label: str
+    ) -> httpx.Response:
         self._pace()
         try:
-            response = self._http.get(path, params=params, headers=self._headers())
+            response = self._http.get(path, params=params, headers={**self._headers(), **(headers or {})})
         except httpx.TimeoutException:
-            raise UpstreamError(f"GET {path} timed out; the backend may be stalled, wait before retrying")
+            raise UpstreamError(f"GET {label} timed out; the backend may be stalled, wait before retrying")
         except httpx.HTTPError as exc:
-            # str(exc) can include the full URL (query may hold the NIF), so only report the type.
-            raise UpstreamError(f"GET {path} failed: {type(exc).__name__}")
+            # str(exc) can include the full URL (query may hold identifiers), so only report the type.
+            raise UpstreamError(f"GET {label} failed: {type(exc).__name__}")
         finally:
             self._last_request = time.monotonic()
-        return self._decode(response, path)
+        self._check(response, label)
+        return response
 
-    def _decode(self, response: httpx.Response, path: str) -> Any:
+    def _check(self, response: httpx.Response, path: str) -> None:
         status = response.status_code
         content_type = response.headers.get("content-type", "")
-        text = response.text
 
-        if "html" in content_type or "_Incapsula_Resource" in text:
+        if "html" in content_type or ("pdf" not in content_type and "_Incapsula_Resource" in response.text):
             raise BlockedError(
                 f"GET {path} returned an Imperva bot-protection page (HTTP {status}); "
                 "the API now gates non-browser clients and needs a reese84 cookie or TLS impersonation",
@@ -98,10 +119,7 @@ class DxlClient:
             )
 
         if 200 <= status < 300:
-            try:
-                return response.json()
-            except ValueError:
-                raise ApiShapeError(f"GET {path} returned HTTP {status} with a non-JSON body ({content_type})", status=status)
+            return
 
         detail, transaction_id = _upstream_detail(response)
         suffix = f": {detail}" if detail else ""
