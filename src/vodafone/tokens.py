@@ -4,6 +4,7 @@ an OS keychain backend can replace it later behind the same TokenStore interface
 
 import base64
 import binascii
+import errno
 import fcntl
 import json
 import os
@@ -16,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from .errors import NotSignedInError
+from .errors import NotSignedInError, UsageError
 
 # A credential sent in a request header: one run of visible ASCII (no whitespace or control chars).
 HEADER_SAFE = re.compile(r"[!-~]+")
@@ -103,13 +104,26 @@ class FileTokenStore:
         don't lock (writes are atomic renames). The lock file is never removed, which would let two
         processes lock different files; the lock goes with the descriptor, also if the process dies.
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except OSError as exc:
+            raise self._lock_error(exc) from None
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise self._lock_error(exc) from None
             yield
         finally:
             os.close(fd)
+
+    def _lock_error(self, exc: OSError) -> UsageError:
+        reason = errno.errorcode.get(exc.errno, type(exc).__name__) if exc.errno else type(exc).__name__
+        return UsageError(
+            f"cannot lock the token file through {self.lock_path} ({reason}); its folder must be writable "
+            "to save tokens"
+        )
 
     def _atomic_write(self, raw: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

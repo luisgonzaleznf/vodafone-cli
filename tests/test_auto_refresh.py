@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from vodafone import api, auth, cli, config
 from vodafone.client import DxlClient
-from vodafone.errors import NotSignedInError
+from vodafone.errors import ApiShapeError, BlockedError, NotSignedInError, UpstreamError
 from vodafone.tokens import FileTokenStore
 
 OLD_ACCESS, OLD_REFRESH = "A" * 28, "r" * 32
@@ -63,6 +63,8 @@ def endpoint(monkeypatch):
             state["requests"].append(request)
         if request.url.path == config.TOKEN_PATH:
             time.sleep(0.05)  # long enough for a concurrent caller to queue on the lock
+            if isinstance(state["grant"], httpx.Response):  # a raw reply, e.g. a bot-protection page
+                return state["grant"]
             status, body = state["grant"]
             return httpx.Response(status, json=body)
         if request.url.path == "/v2/subscription/subscriptions/":
@@ -148,29 +150,113 @@ def test_a_token_about_to_expire_without_a_refresh_token_is_still_used(tokens_fi
     assert endpoint["paths"]() == ["/data"]
 
 
-@pytest.mark.parametrize(
-    ("grant", "reason"),
-    [
-        ((400, {"error": "invalid_grant", "error_description": f"bad {OLD_REFRESH}"}), "refused to renew"),
-        ((403, {"error": "access_denied"}), "refused to renew"),
-        ((503, {"message": f"down {OLD_REFRESH}"}), "renewing the session failed (upstream_unavailable)"),
-        ((200, {"access_token": "has a space"}), "renewing the session failed (api_changed)"),
-    ],
-)
-def test_a_failed_refresh_is_not_signed_in_tried_once_and_leaves_the_file(tokens_file, endpoint, grant, reason):
+REFUSED = [(400, {"error": "invalid_grant", "error_description": f"bad {OLD_REFRESH}"}), (403, {"error": "access_denied"})]
+UNAVAILABLE = [
+    ((503, {"message": f"down {OLD_REFRESH}"}), UpstreamError, 5),
+    ((429, {"message": "slow down"}), BlockedError, 5),
+    (httpx.Response(200, text="<html>_Incapsula_Resource</html>", headers={"content-type": "text/html"}), BlockedError, 5),
+    ((200, {"access_token": "has a space"}), ApiShapeError, 7),
+]
+
+
+def _no_secrets(err) -> None:
+    for secret in (OLD_REFRESH, OLD_ACCESS, CSRF):
+        assert secret not in str(err.to_dict()) and secret not in getattr(err, "reason", "")
+
+
+@pytest.mark.parametrize("grant", REFUSED)
+def test_a_refused_refresh_of_an_expired_token_is_not_signed_in_and_leaves_the_file(tokens_file, endpoint, grant):
     endpoint["grant"] = grant
     before = tokens_file.read_bytes()
 
     with pytest.raises(NotSignedInError) as exc:
         _read(tokens_file)
 
-    assert exc.value.kind == "auth_expired" and reason in exc.value.reason
-    if grant[0] != 200:  # an HTTP error carries the request's own trace id; a shape error has none
-        assert exc.value.transaction_id == endpoint["requests"][0].headers["vf-trace-transaction-id"]
-    for secret in (OLD_REFRESH, OLD_ACCESS, CSRF):
-        assert secret not in str(exc.value.to_dict()) and secret not in exc.value.reason
+    assert exc.value.kind == "auth_expired" and exc.value.exit_code == 3
+    assert exc.value.reason == "Vodafone refused to renew the session"
+    assert exc.value.transaction_id == endpoint["requests"][0].headers["vf-trace-transaction-id"]
+    _no_secrets(exc.value)
     assert endpoint["paths"]() == [config.TOKEN_PATH]  # once, and no data call
     assert tokens_file.read_bytes() == before
+
+
+@pytest.mark.parametrize(("grant", "error", "exit_code"), UNAVAILABLE)
+def test_vodafone_failing_to_refresh_an_expired_token_keeps_its_own_error(tokens_file, endpoint, grant, error, exit_code):
+    endpoint["grant"] = grant
+    before = tokens_file.read_bytes()
+
+    with pytest.raises(error) as exc:
+        _read(tokens_file)
+
+    assert type(exc.value) is error and exc.value.exit_code == exit_code  # not "sign in again"
+    assert exc.value.message.startswith("the access token expired at ") and "renewing it failed: " in exc.value.message
+    _no_secrets(exc.value)
+    assert endpoint["paths"]() == [config.TOKEN_PATH]  # once, and no data call
+    assert tokens_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("grant", [*REFUSED, *(g for g, _, _ in UNAVAILABLE)])
+def test_a_failed_early_refresh_lets_the_read_go_ahead_with_the_still_valid_token(tokens_file, endpoint, grant):
+    _write(tokens_file, access_in=timedelta(seconds=30))
+    endpoint["grant"] = grant
+    before = tokens_file.read_bytes()
+
+    assert _read(tokens_file) == f"Bearer {OLD_ACCESS}"
+    assert endpoint["paths"]() == [config.TOKEN_PATH, "/data"]
+    assert tokens_file.read_bytes() == before
+
+
+@pytest.fixture
+def read_only_dir(tmp_path):
+    folder = tmp_path / "ro"
+    folder.mkdir()
+    yield folder
+    folder.chmod(0o700)
+
+
+def test_an_unrenewable_token_set_is_used_or_refused_without_locking(read_only_dir, endpoint):
+    path = read_only_dir / "tokens.json"
+    _write(path, access_in=timedelta(seconds=30), refresh=None)
+    read_only_dir.chmod(0o500)
+
+    assert _read(path) == f"Bearer {OLD_ACCESS}"  # still valid; nothing to renew it with
+    read_only_dir.chmod(0o700)
+    _write(path, access_in=timedelta(hours=-1), refresh=None)
+    read_only_dir.chmod(0o500)
+    with pytest.raises(NotSignedInError):
+        _read(path)
+
+    assert sorted(p.name for p in read_only_dir.iterdir()) == ["tokens.json"]  # no lock file
+    assert endpoint["grants"]() == []
+
+
+def test_a_lock_that_cannot_be_made_is_a_usage_error_or_lets_a_valid_token_through(read_only_dir, endpoint):
+    path = read_only_dir / "tokens.json"
+    _write(path, access_in=timedelta(seconds=30))
+    read_only_dir.chmod(0o500)
+
+    assert _read(path) == f"Bearer {OLD_ACCESS}"  # renewable, but the refreshed set couldn't be saved
+    read_only_dir.chmod(0o700)
+    _write(path, access_in=timedelta(hours=-1))
+    before = path.read_bytes()
+    read_only_dir.chmod(0o500)
+
+    result = CliRunner().invoke(cli.app, ["--tokens", str(path), "me"])
+
+    assert result.exit_code == 2, result.output
+    error = json.loads(result.stderr)["error"]
+    assert error["type"] == "usage" and "tokens.json.lock (EACCES)" in error["message"] and "writable" in error["message"]
+    assert endpoint["grants"]() == [] and path.read_bytes() == before
+
+
+def test_auth_refresh_without_a_token_file_creates_nothing(tmp_path, endpoint):
+    path = tmp_path / "cfg" / "tokens.json"
+
+    result = CliRunner().invoke(cli.app, ["--tokens", str(path), "auth", "refresh"])
+
+    assert result.exit_code == 3 and "token file not found" in json.loads(result.stderr)["error"]["message"]
+    assert not path.parent.exists()
+    assert endpoint["requests"] == []
 
 
 def test_tokens_another_process_refreshed_between_check_and_lock_are_used(tokens_file, endpoint, monkeypatch):

@@ -9,6 +9,7 @@ the CLI reads, under the token file's lock; none ever logs a credential or token
 """
 
 import base64
+import contextlib
 import json
 import re
 import uuid
@@ -20,7 +21,7 @@ from pydantic import ValidationError
 
 from . import config
 from .client import DxlClient
-from .errors import ApiShapeError, AuthError, NotSignedInError, VodafoneError
+from .errors import ApiShapeError, AuthError, NotSignedInError, UsageError, VodafoneError
 from .models import (
     AccessTokenStatus,
     AuthStatusOutput,
@@ -253,56 +254,83 @@ def login(
 
 def refresh(store: FileTokenStore) -> RefreshOutput:
     """`vodafone auth refresh`: exchange the refresh token for a new access token and save the
-    rotated set, under the token file's lock."""
+    rotated set, under the token file's lock. The set is checked before the lock is taken, so a
+    missing or unusable one creates nothing, and read again once the lock is held."""
+    _check_renewable(store, store.load())
     with store.lock():
         tokens = store.load()
-        if not tokens.refresh_token:
-            raise NotSignedInError(
-                f"the token file has no refreshToken: {store.path}; run `vodafone auth login`",
-                reason="the token file has no refresh token",
-            )
-        if tokens.is_refresh_expired():
-            raise NotSignedInError(
-                f"the refresh token expired at {_iso(tokens.refresh_expires_at)}; run `vodafone auth login` "
-                "(password + SMS code)",
-                reason=f"the refresh token expired at {_iso(tokens.refresh_expires_at)}",
-            )
+        _check_renewable(store, tokens)
         return _refresh(store, tokens)
+
+
+def _check_renewable(store: FileTokenStore, tokens: TokenSet) -> None:
+    if not tokens.refresh_token:
+        raise NotSignedInError(
+            f"the token file has no refreshToken: {store.path}; run `vodafone auth login`",
+            reason="the token file has no refresh token",
+        )
+    if tokens.is_refresh_expired():
+        raise NotSignedInError(
+            f"the refresh token expired at {_iso(tokens.refresh_expires_at)}; run `vodafone auth login` "
+            "(password + SMS code)",
+            reason=f"the refresh token expired at {_iso(tokens.refresh_expires_at)}",
+        )
 
 
 def ensure_fresh(store: FileTokenStore) -> TokenSet:
     """The stored token set, refreshed first if its access token has expired or expires within
     REFRESH_MARGIN and a refresh token is present and unexpired. Used by every read (CLI and MCP);
-    `auth status` never calls it.
+    `auth status` never calls it. A token whose expiry is unknown is used as it is.
 
     The refresh runs under the token file's lock, and the file is re-read once the lock is held:
-    if another process refreshed meanwhile, its tokens are used and nothing is sent. A refresh is
-    tried once, never retried. If it fails, or the token set can't be renewed, the error is a
-    NotSignedInError (auth_expired) and the file is left as it was. A token whose expiry is unknown
-    is used as it is.
+    if another process refreshed meanwhile, its tokens are used and nothing is sent. Nothing is
+    locked when the set can't be renewed. A refresh is tried once, never retried, and a failure
+    leaves the file as it was. While the access token is still valid, the read goes ahead with it
+    whatever the refresh did. Once it has expired, a refused or impossible refresh is a
+    NotSignedInError (auth_expired, sign in again), and any other failure keeps its own type: a
+    Vodafone outage or block is exit 5, as for any request, not a lost session.
     """
     tokens = store.load()
     if not _due(tokens):
         return tokens
-    with store.lock():
-        tokens = store.load()
+    if not _renewable(tokens):
+        return _unrenewed(store, tokens)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(store.lock())
+        except UsageError:  # the lock file can't be made, so nothing could be saved either
+            if not tokens.is_access_expired():
+                return tokens
+            raise
+        tokens = store.load()  # another process may have refreshed while we waited for the lock
         if not _due(tokens):
             return tokens
-        now = datetime.now(UTC)
-        renewable = tokens.refresh_token is not None and not tokens.is_refresh_expired(now)
-        if not renewable:
-            if not tokens.is_access_expired(now):
-                return tokens  # still valid for under REFRESH_MARGIN, with nothing to renew it
-            raise _not_renewable(store, tokens)
+        if not _renewable(tokens):
+            return _unrenewed(store, tokens)
         try:
             _refresh(store, tokens)
         except Exception as exc:
-            raise _refresh_failed(tokens, exc) from None
+            if not tokens.is_access_expired():
+                return store.load()  # still valid: the read goes ahead, and a later one tries again
+            if isinstance(exc, VodafoneError):
+                raise _refresh_failed(tokens, exc) from None
+            raise
         return store.load()
 
 
 def _due(tokens: TokenSet) -> bool:
     return tokens.is_access_expired(datetime.now(UTC) + REFRESH_MARGIN)
+
+
+def _renewable(tokens: TokenSet) -> bool:
+    return tokens.refresh_token is not None and not tokens.is_refresh_expired()
+
+
+def _unrenewed(store: FileTokenStore, tokens: TokenSet) -> TokenSet:
+    """A due token set that can't be renewed: used while it is still valid, else not signed in."""
+    if not tokens.is_access_expired():
+        return tokens
+    raise _not_renewable(store, tokens)
 
 
 def _expiry(tokens: TokenSet) -> str:
@@ -322,25 +350,18 @@ def _not_renewable(store: FileTokenStore, tokens: TokenSet) -> NotSignedInError:
     )
 
 
-def _refresh_failed(tokens: TokenSet, exc: Exception) -> NotSignedInError:
-    """A failed automatic refresh, reported as not signed in. Only the original error's own
-    (allowlisted) message is carried, or for anything unexpected its type."""
-    if not isinstance(exc, VodafoneError):
-        exc = VodafoneError(f"unexpected internal error: {type(exc).__name__}")
+def _refresh_failed(tokens: TokenSet, exc: VodafoneError) -> VodafoneError:
+    """A failed automatic refresh of an expired access token. Only the original error's own
+    (allowlisted) message is carried."""
     status = {"status": exc.status, "transaction_id": exc.transaction_id}
-    if isinstance(exc, AuthError):  # the token endpoint refused the refresh token
+    if isinstance(exc, AuthError):  # the token endpoint refused the refresh token: only a sign-in helps
         return NotSignedInError(
-            f"{_expiry(tokens) if tokens.is_access_expired() else 'the access token is about to expire'} and "
-            f"renewing it was refused: {exc.message}; run `vodafone auth login`",
+            f"{_expiry(tokens)} and renewing it was refused: {exc.message}; run `vodafone auth login`",
             reason="Vodafone refused to renew the session",
             **status,
         )
-    return NotSignedInError(
-        f"{_expiry(tokens) if tokens.is_access_expired() else 'the access token is about to expire'} and "
-        f"renewing it failed: {exc.message}; try again in a few minutes, or run `vodafone auth login`",
-        reason=f"renewing the session failed ({exc.kind}); try again in a few minutes, or sign in again",
-        **status,
-    )
+    # Unavailable, blocked or an unexpected answer: the same error as for any other request.
+    return type(exc)(f"{_expiry(tokens)} and renewing it failed: {exc.message}", **status)
 
 
 def _refresh(store: FileTokenStore, tokens: TokenSet) -> RefreshOutput:

@@ -427,6 +427,20 @@ async def test_an_expired_session_that_cannot_be_renewed_says_not_signed_in(toke
 
 
 @pytest.mark.anyio
+async def test_vodafone_down_during_a_refresh_is_not_reported_as_signed_out(tokens_path, vodafone):
+    _write(tokens_path, access_in=timedelta(hours=-1))
+    vodafone["refresh"] = (503, {"message": "down"})
+    before = tokens_path.read_bytes()
+
+    async with Client(build_server(tokens_path)) as client:
+        error = _error(await client.call_tool("get_account", {}))
+
+    assert error["type"] == "upstream_unavailable" and error["exit_code"] == 5
+    assert "Not signed in" not in error["message"] and "login" not in error["message"]
+    assert tokens_path.read_bytes() == before
+
+
+@pytest.mark.anyio
 async def test_an_expired_session_is_renewed_before_a_tool_call(tokens_path, vodafone):
     _write(tokens_path, access_in=timedelta(hours=-1))
 
