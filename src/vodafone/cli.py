@@ -107,10 +107,6 @@ def _choose(title: str, options: list[str]) -> int:
         typer.echo(f"\x1b[{len(options)}A", err=True, nl=False)  # back up to redraw the menu
 
 
-def _iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(UTC).isoformat() if dt else None
-
-
 def _print_version(value: bool) -> None:
     if value:
         typer.echo(package_version() or "unknown")
@@ -186,32 +182,9 @@ def invoices_download(
 @auth_app.command("status")
 def auth_status(ctx: typer.Context) -> None:
     """Token validity and refresh-token days remaining (offline; exit 3 if the access token expired)."""
-    payload = _emit(lambda: _token_status(ctx.obj.tokens_path, datetime.now(UTC)))
+    payload = _emit(lambda: auth.token_status(FileTokenStore(ctx.obj.tokens_path), datetime.now(UTC)).model_dump(mode="json"))
     if payload["access_token"]["expired"]:
         raise typer.Exit(EXIT_AUTH)
-
-
-def _token_status(path: Path, now: datetime) -> dict[str, Any]:
-    tokens = FileTokenStore(path).load()
-    access_left = (tokens.access_expires_at - now).total_seconds() if tokens.access_expires_at else None
-    refresh_left = (tokens.refresh_expires_at - now).total_seconds() if tokens.refresh_expires_at else None
-    return {
-        "store": "file",
-        "tokens_file": str(path),
-        "exported_at": _iso(tokens.exported_at),
-        "access_token": {
-            "expires_at": _iso(tokens.access_expires_at),
-            "expired": tokens.is_access_expired(now),
-            "seconds_remaining": max(0, int(access_left)) if access_left is not None else None,
-        },
-        "refresh_token": {
-            "present": tokens.refresh_token is not None,
-            "expires_at": _iso(tokens.refresh_expires_at),
-            "expired": tokens.is_refresh_expired(now),
-            "days_remaining": round(max(0.0, refresh_left) / 86400, 1) if refresh_left is not None else None,
-        },
-        "jwt": {"present": tokens.jwt is not None, "expires_at": _iso(tokens.jwt_expires_at())},
-    }
 
 
 @auth_app.command("login")
@@ -241,7 +214,8 @@ def auth_refresh(ctx: typer.Context) -> None:
 
 @app.command("mcp")
 def mcp_command(ctx: typer.Context) -> None:
-    """Run a read-only MCP server on stdio (tools: get_account, list_lines, get_usage, list_invoices)."""
+    """Run the MCP server on stdio: read tools (get_account, list_lines, get_usage, list_invoices),
+    auth_status, and login (browser sign-in)."""
     from .mcp_server import build_server  # deferred: the MCP SDK is only needed by this command
 
     build_server(ctx.obj.tokens_path, ctx.obj.account).run("stdio")

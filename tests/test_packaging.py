@@ -1,6 +1,8 @@
-"""The distribution files agree: install.sh and the Homebrew formula pin the same release."""
+"""The distribution files agree: install.sh and the Homebrew formula pin the same release, and the
+README's install lines pin the version in pyproject.toml."""
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -12,3 +14,12 @@ def test_install_script_and_formula_pin_the_same_release():
 
     assert script and formula
     assert script.group(1) == formula.group(1)
+
+
+def test_the_readme_install_lines_pin_the_pyproject_version():
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    readme = (ROOT / "README.md").read_text()
+    pins = re.findall(r"git\+https://github\.com/luisgonzaleznf/vodafone-cli(\S*)", readme)
+
+    assert len(pins) >= 4  # uv tool install, Claude Code, Codex, the cache warm-up, Claude Desktop
+    assert set(pins) <= {f"@v{version}", f'@v{version}",'}

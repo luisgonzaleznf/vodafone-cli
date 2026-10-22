@@ -1,6 +1,7 @@
 """`auth login` and `auth refresh` against a mock token endpoint. All values are synthetic."""
 
 import base64
+import contextlib
 import json
 import stat
 from datetime import UTC, datetime, timedelta
@@ -390,6 +391,121 @@ def test_the_line_menu_follows_arrow_keys_and_digits_on_a_terminal(monkeypatch, 
 
     assert cli._choose("¿A qué línea?", [LINE, LINE_2, "6*****003"]) == picked
     assert next(pressed, None) is None  # Enter ended the menu: no key left unread
+
+
+# --- step-wise login (LoginFlow) ------------------------------------------------------------------
+
+
+def test_the_flow_runs_one_request_per_step_and_writes_only_at_the_end(login_endpoint, tmp_path):
+    login_endpoint["password_grant"] = (200, {**_token_body(FF_ACCESS), "jws": _jws({"msisdnList": [LINE, LINE_2]})})
+    store = _store(tmp_path)
+    flow = auth.LoginFlow(store)
+    paths = lambda: [r.url.path for r in login_endpoint["requests"]]
+
+    assert flow.start(USERNAME, PASSWORD) == [LINE, LINE_2]
+    assert paths() == [config.TOKEN_PATH] and flow.lines == [LINE, LINE_2] and not flow.code_sent
+    flow.send_code(LINE_2)
+    assert paths()[1:] == [config.OTP_AUTHORIZE_PATH] and flow.code_sent
+    assert not store.path.exists()
+
+    out = flow.finish(f"  {OTP_CODE}\n")
+
+    assert paths()[2:] == [config.OTP_TOKEN_PATH, "/v2/subscription/subscriptions/"]
+    reqs = login_endpoint["requests"]
+    assert json.loads(reqs[1].content)["login_hint"] == LINE_2
+    assert json.loads(reqs[2].content)["code"] == OTP_CODE
+    assert reqs[2].headers["cookie"].startswith("visid_incap_1=v1; JSESSIONID=sess-1; ")  # jar carried across steps
+    assert store.load().access_token == NEW_ACCESS and out.jwt_fetched
+
+
+def test_the_flow_keeps_no_credential_after_the_password_grant(login_endpoint, tmp_path):
+    flow = auth.LoginFlow(_store(tmp_path))
+    flow.start(USERNAME, PASSWORD)
+
+    assert PASSWORD not in repr(vars(flow)) and USERNAME not in repr(vars(flow))
+
+
+@pytest.mark.parametrize("line", [USERNAME, "6*****003", "", LINE + " "])
+def test_the_flow_only_sends_the_code_to_an_offered_masked_line(login_endpoint, tmp_path, line):
+    flow = auth.LoginFlow(_store(tmp_path))
+    flow.start(USERNAME, PASSWORD)
+
+    with pytest.raises(AuthError, match="no line chosen"):
+        flow.send_code(line)
+    assert [r.url.path for r in login_endpoint["requests"]] == [config.TOKEN_PATH]  # no SMS sent
+    assert not flow.code_sent
+
+
+def test_the_flow_refuses_steps_out_of_order(login_endpoint, tmp_path):
+    store = _store(tmp_path)
+    flow = auth.LoginFlow(store)
+
+    with pytest.raises(AuthError, match="usuario and password first"):
+        flow.send_code(LINE)
+    with pytest.raises(AuthError, match="no SMS code was sent"):
+        flow.finish(OTP_CODE)
+    flow.start(USERNAME, PASSWORD)
+    with pytest.raises(AuthError, match="no SMS code was sent"):
+        flow.finish(OTP_CODE)
+    flow.send_code(LINE)
+    with pytest.raises(AuthError, match="no SMS code entered"):
+        flow.finish("   ")
+
+    assert [r.url.path for r in login_endpoint["requests"]] == [config.TOKEN_PATH, config.OTP_AUTHORIZE_PATH]
+    assert not store.path.exists()
+
+
+def test_a_rejected_code_can_be_retried_and_a_finished_flow_is_spent(login_endpoint, tmp_path):
+    replies = iter([(401, {"error": "invalid_grant", "error_description": f"bad code 000000 {PASSWORD}"}), (200, _token_body(NEW_ACCESS))])
+    login_endpoint["otp_token"] = lambda request: next(replies)
+    store = _store(tmp_path)
+    flow = auth.LoginFlow(store)
+    flow.start(USERNAME, PASSWORD)
+    flow.send_code(LINE)
+
+    with pytest.raises(AuthError, match="invalid_grant") as exc:
+        flow.finish("000000")
+    assert "000000" not in exc.value.message and PASSWORD not in exc.value.message
+    assert not store.path.exists()
+
+    flow.finish(OTP_CODE)
+    assert store.load().access_token == NEW_ACCESS
+    sent = len(login_endpoint["requests"])
+    with pytest.raises(AuthError):
+        flow.finish(OTP_CODE)
+    assert len(login_endpoint["requests"]) == sent
+
+
+def test_the_token_file_is_written_while_holding_its_lock(login_endpoint, tmp_path, monkeypatch):
+    events = []
+    real_lock, real_write = FileTokenStore.lock, FileTokenStore.write
+
+    @contextlib.contextmanager
+    def spy_lock(self):
+        with real_lock(self):
+            events.append("locked")
+            yield
+            events.append("unlocked")
+
+    monkeypatch.setattr(FileTokenStore, "lock", spy_lock)
+    monkeypatch.setattr(FileTokenStore, "write", lambda self, raw: events.append("write") or real_write(self, raw))
+
+    auth.login(_store(tmp_path), USERNAME, PASSWORD, lambda: OTP_CODE)
+
+    assert events == ["locked", "write", "unlocked"]
+
+
+def test_starting_again_discards_the_previous_attempt(login_endpoint, tmp_path):
+    flow = auth.LoginFlow(_store(tmp_path))
+    flow.start(USERNAME, PASSWORD)
+    flow.send_code(LINE)
+    login_endpoint["password_grant"] = (401, {"error": "invalid_grant"})
+
+    with pytest.raises(AuthError, match="invalid_grant"):
+        flow.start(USERNAME, "wrong-pw")
+    assert flow.lines == [] and not flow.code_sent
+    with pytest.raises(AuthError, match="no SMS code was sent"):
+        flow.finish(OTP_CODE)
 
 
 # --- refresh -------------------------------------------------------------------------------------

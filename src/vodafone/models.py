@@ -313,3 +313,51 @@ class RefreshOutput(BaseModel):
     refresh_token_rotated: bool
     refresh_token_expires_at: str | None
     jwt_refreshed: bool
+
+
+class AccessTokenStatus(BaseModel):
+    expires_at: str | None
+    expired: bool
+    seconds_remaining: int | None
+
+
+class RefreshTokenStatus(BaseModel):
+    present: bool
+    expires_at: str | None
+    expired: bool
+    days_remaining: float | None
+
+
+class JwtStatus(BaseModel):
+    present: bool
+    expires_at: str | None
+
+
+class TokenStatusOutput(BaseModel):
+    """`vodafone auth status`."""
+
+    store: str
+    tokens_file: str
+    exported_at: str | None
+    access_token: AccessTokenStatus
+    refresh_token: RefreshTokenStatus
+    jwt: JwtStatus
+
+
+class AuthStatusOutput(BaseModel):
+    """The MCP server's auth_status: `vodafone auth status` plus whether the read tools can run.
+    Without a readable token file, the token fields are null."""
+
+    signed_in: bool = Field(
+        description=(
+            "True if the read tools can run: the access token is valid or a refresh token can renew it, the "
+            "identity JWT is readable, and no browser sign-in is in progress."
+        )
+    )
+    reason: str | None = Field(description="Why the user is not signed in; null when signed in.")
+    store: str
+    tokens_file: str
+    exported_at: str | None
+    access_token: AccessTokenStatus | None
+    refresh_token: RefreshTokenStatus | None
+    jwt: JwtStatus | None
