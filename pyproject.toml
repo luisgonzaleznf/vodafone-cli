@@ -1,0 +1,28 @@
+[project]
+name = "vodafone-cli"
+version = "0.1.0"
+description = "JSON-first CLI for your own Mi Vodafone (Vodafone España) account, over the DXL API"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.14.1",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+vodafone = "vodafone.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "vodafone"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
