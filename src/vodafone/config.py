@@ -55,11 +55,23 @@ TOKENS_FILE_RELATIVE = Path(".local-secrets") / "tokens.json"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def user_tokens_path() -> Path:
+    """$XDG_CONFIG_HOME/vodafone-cli/tokens.json, default ~/.config/vodafone-cli/tokens.json."""
+    base = os.environ.get("XDG_CONFIG_HOME", "")
+    config_home = Path(base) if os.path.isabs(base) else Path.home() / ".config"
+    return config_home / "vodafone-cli" / "tokens.json"
+
+
 def default_tokens_path() -> Path:
-    """$VODAFONE_TOKENS_FILE, else ./.local-secrets/tokens.json, else the checkout's copy."""
+    """$VODAFONE_TOKENS_FILE, else the per-user file for an installed copy (Homebrew, uv tool, pip),
+    else, from a source checkout, ./.local-secrets/tokens.json if it exists or the checkout's copy.
+
+    An installed copy has no checkout (the directory above its package is the environment's lib/,
+    which an upgrade replaces), and a .local-secrets/ in whatever directory it happens to run from
+    belongs to something else: `auth login` must not write there."""
     if env := os.environ.get(TOKENS_FILE_ENV):
         return Path(env).expanduser()
+    if not (_PROJECT_ROOT / "pyproject.toml").is_file():
+        return user_tokens_path()
     cwd_path = Path.cwd() / TOKENS_FILE_RELATIVE
-    if cwd_path.exists():
-        return cwd_path
-    return _PROJECT_ROOT / TOKENS_FILE_RELATIVE
+    return cwd_path if cwd_path.exists() else _PROJECT_ROOT / TOKENS_FILE_RELATIVE
