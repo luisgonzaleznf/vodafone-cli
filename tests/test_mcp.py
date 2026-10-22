@@ -6,6 +6,7 @@ import logging
 import sys
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import anyio
@@ -85,12 +86,16 @@ def tokens_file(tmp_path):
 
 @pytest.fixture
 def dxl(monkeypatch):
-    """Route every DxlClient, CLI and MCP alike, to a mock DXL. Returns {path: (status, body)} overrides."""
-    overrides: dict[str, tuple[int, object]] = {}
+    """Route every DxlClient, CLI and MCP alike, to a mock DXL. Returns {path: (status, body) | raw bytes} overrides."""
+    overrides: dict[str, tuple[int, object] | bytes] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        status, body = overrides.get(request.url.path, (200, ROUTES[request.url.path]))
-        return httpx.Response(status, json=body, headers={"content-type": "application/vnd.vodafone.a42+json"})
+        headers = {"content-type": "application/vnd.vodafone.a42+json"}
+        override = overrides.get(request.url.path, (200, ROUTES[request.url.path]))
+        if isinstance(override, bytes):  # a body json.dumps would refuse to produce, e.g. a literal NaN
+            return httpx.Response(200, content=override, headers=headers)
+        status, body = override
+        return httpx.Response(status, json=body, headers=headers)
 
     monkeypatch.setattr(api, "DxlClient", lambda tokens: DxlClient(tokens, spacing=0, transport=httpx.MockTransport(handler)))
     return overrides
@@ -139,8 +144,16 @@ async def test_tool_returns_the_cli_json(tokens_file, dxl, tool, arguments, cli_
     assert result.structured_content == json.loads(expected.stdout)
 
 
+@pytest.fixture
+def fixed_trace_id(monkeypatch):
+    """Every request's vf-trace-transaction-id is this value, so two runs' errors compare equal."""
+    fixed = uuid.UUID("00000000-0000-4000-8000-000000000001")
+    monkeypatch.setattr(uuid, "uuid4", lambda: fixed)
+    return str(fixed)
+
+
 @pytest.mark.anyio
-async def test_tool_error_is_the_cli_error_payload(tokens_file, dxl):
+async def test_tool_error_is_the_cli_error_payload(tokens_file, dxl, fixed_trace_id):
     dxl["/es/csm-api/customerBillAPI/v3/customerBill"] = (
         500, {"code": 205, "reason": "INTERNAL_SERVER_ERROR", "message": f"sin datos para el cliente {ACCOUNT}", "status": 500},
     )
@@ -153,7 +166,24 @@ async def test_tool_error_is_the_cli_error_payload(tokens_file, dxl):
     assert result.structured_content is None
     assert result.content[0].text == expected.stderr.strip()
     assert json.loads(result.content[0].text)["error"]["type"] == "upstream_unavailable"
+    assert json.loads(result.content[0].text)["error"]["transaction_id"] == fixed_trace_id
     assert ACCOUNT not in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_an_error_never_echoes_the_identity_document_it_queried(tokens_file, dxl, fixed_trace_id):
+    # Codex's reproduction: the bill query sends the JWT's document id; a 500 echoes it back.
+    dxl["/es/csm-api/customerBillAPI/v3/customerBill"] = (
+        500, {"message": f"documento {NIF} sin facturas", "transactionId": NIF, "reason": NIF},
+    )
+
+    cli_result = _cli(tokens_file, "invoices", "list")
+    mcp_result = await _call(tokens_file, "list_invoices")
+
+    assert cli_result.exit_code == 5 and mcp_result.is_error
+    for text in (cli_result.output, mcp_result.content[0].text):
+        assert NIF not in text
+        assert json.loads(text)["error"]["transaction_id"] == fixed_trace_id
 
 
 @pytest.mark.anyio
@@ -227,4 +257,44 @@ async def test_stdio_entry_point_serves_the_tools(tmp_path):
 
     assert names == set(TOOL_NAMES)
     assert result.is_error
-    assert json.loads(result.content[0].text)["error"]["type"] == "auth_expired"
+    error = json.loads(result.content[0].text)["error"]
+    assert error["type"] == "auth_expired" and "vodafone auth login" in error["message"]
+
+
+def test_instructions_point_at_native_login():
+    from vodafone.mcp_server import INSTRUCTIONS
+
+    assert "vodafone auth login" in INSTRUCTIONS
+
+
+_BALANCE = '{"items": [{"type": "data", "allowance": {"usedAllowance": "%s", "usedAllowanceUnitCode": "GB"}}]}'
+_BILL = '[{"id": {"value": "F-1"}, "amountsDue": {"amount": {"value": "%s", "currencyID": "EUR"}}}]'
+_ACCOUNTS = '{"items": [{"id": "%s", "debtAmount": %%s}]}' % ACCOUNT
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("path", "body", "tool", "cli_args"),
+    [
+        ("/v2/service/serviceBalances", _BALANCE % "Infinity", "get_usage", ["usage"]),
+        ("/v2/service/serviceBalances", _BALANCE % "NaN", "get_usage", ["usage"]),
+        ("/v2/service/serviceBalances", _BALANCE % "-inf", "get_usage", ["usage"]),
+        ("/v2/service/serviceBalances", _BALANCE % "1e400", "get_usage", ["usage"]),
+        ("/es/csm-api/customerBillAPI/v3/customerBill", _BILL % "NaN", "list_invoices", ["invoices", "list"]),
+        ("/v2/customer/customerAccounts", _ACCOUNTS % "NaN", "get_account", ["me"]),
+        ("/v2/customer/customerAccounts", _ACCOUNTS % "-Infinity", "get_account", ["me"]),
+        ("/v2/customer/customerAccounts", _ACCOUNTS % "1e400", "get_account", ["me"]),
+    ],
+)
+async def test_non_finite_numbers_are_api_changed_in_cli_and_mcp(tokens_file, dxl, path, body, tool, cli_args):
+    dxl[path] = body.encode()
+
+    expected = _cli(tokens_file, *cli_args)
+    assert expected.exit_code == 7, expected.output
+    assert expected.stdout == ""
+    assert json.loads(expected.stderr)["error"]["type"] == "api_changed"
+
+    result = await _call(tokens_file, tool)
+
+    assert result.is_error and result.structured_content is None
+    assert result.content[0].text == expected.stderr.strip()

@@ -11,10 +11,10 @@ from typing import Annotated, Any, NoReturn
 import typer
 from pydantic import BaseModel
 
-from . import api
+from . import api, auth
 from .client import DxlClient
 from .config import TOKENS_FILE_ENV, default_tokens_path
-from .errors import EXIT_AUTH, NotCapturedError, VodafoneError
+from .errors import EXIT_AUTH, VodafoneError
 from .output import render, render_error
 from .tokens import FileTokenStore
 
@@ -28,7 +28,7 @@ app = typer.Typer(
 )
 lines_app = typer.Typer(help="Lines (mobile, landline, fibre) and their tariffs.")
 invoices_app = typer.Typer(help="Invoices.", no_args_is_help=True)
-auth_app = typer.Typer(help="Token set status.", no_args_is_help=True)
+auth_app = typer.Typer(help="Sign in, refresh, and check the token set.", no_args_is_help=True)
 app.add_typer(lines_app, name="lines")
 app.add_typer(invoices_app, name="invoices")
 app.add_typer(auth_app, name="auth")
@@ -40,22 +40,31 @@ class State:
     account: str | None
 
 
-def _emit(payload: Any) -> None:
-    typer.echo(render(payload))
-
-
 def _fail(err: VodafoneError) -> NoReturn:
     typer.echo(render_error(err), err=True)
     raise typer.Exit(err.exit_code)
 
 
-def _run(ctx: typer.Context, fn: Callable[[DxlClient], BaseModel]) -> None:
-    state: State = ctx.obj
+def _emit(produce: Callable[[], Any]) -> Any:
+    """Print `produce()` as JSON on stdout and return it. Every command goes through here, so any
+    failure becomes the stderr error payload: a VodafoneError as is, anything else by its type only
+    (messages can embed request URLs, headers or token values)."""
     try:
-        result = api.run_with_client(state.tokens_path, fn)
+        payload = produce()
+        text = render(payload)
+    except (typer.Exit, typer.Abort):
+        raise
     except VodafoneError as err:
         _fail(err)
-    _emit(result.model_dump(mode="json"))
+    except Exception as exc:
+        _fail(VodafoneError(f"unexpected internal error: {type(exc).__name__}"))
+    typer.echo(text)
+    return payload
+
+
+def _run(ctx: typer.Context, fn: Callable[[DxlClient], BaseModel]) -> None:
+    state: State = ctx.obj
+    _emit(lambda: api.run_with_client(state.tokens_path, fn).model_dump(mode="json"))
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -117,60 +126,60 @@ def invoices_download(
     target: Annotated[str, typer.Argument(help="Invoice id (from `invoices list`), 'latest' or 'all'.")] = "latest",
     directory: Annotated[Path, typer.Option("--dir", help="Output directory (created if missing).")] = Path("."),
 ) -> None:
-    """Save invoice PDFs as factura_YYYY-MM.pdf, one at a time. Existing files are skipped."""
+    """Save invoice PDFs as factura_YYYY-MM_<id>.pdf, one at a time. Existing files are skipped."""
     _run(ctx, lambda client: api.download_invoices(client, target, directory, ctx.obj.account))
 
 
 @auth_app.command("status")
 def auth_status(ctx: typer.Context) -> None:
     """Token validity and refresh-token days remaining (offline; exit 3 if the access token expired)."""
-    path: Path = ctx.obj.tokens_path
-    try:
-        tokens = FileTokenStore(path).load()
-    except VodafoneError as err:
-        _fail(err)
-
-    now = datetime.now(UTC)
-    access_left = (tokens.access_expires_at - now).total_seconds() if tokens.access_expires_at else None
-    refresh_left = (tokens.refresh_expires_at - now).total_seconds() if tokens.refresh_expires_at else None
-    exp = tokens.claims().get("exp")
-    _emit(
-        {
-            "store": "file",
-            "tokens_file": str(path),
-            "exported_at": _iso(tokens.exported_at),
-            "access_token": {
-                "expires_at": _iso(tokens.access_expires_at),
-                "expired": tokens.is_access_expired(now),
-                "seconds_remaining": max(0, int(access_left)) if access_left is not None else None,
-            },
-            "refresh_token": {
-                "present": tokens.refresh_token is not None,
-                "expires_at": _iso(tokens.refresh_expires_at),
-                "expired": tokens.is_refresh_expired(now),
-                "days_remaining": round(max(0.0, refresh_left) / 86400, 1) if refresh_left is not None else None,
-            },
-            "jwt": {
-                "present": tokens.jwt is not None,
-                "expires_at": _iso(datetime.fromtimestamp(exp, UTC)) if isinstance(exp, int | float) else None,
-            },
-        }
-    )
-    if tokens.is_access_expired(now):
+    payload = _emit(lambda: _token_status(ctx.obj.tokens_path, datetime.now(UTC)))
+    if payload["access_token"]["expired"]:
         raise typer.Exit(EXIT_AUTH)
 
 
+def _token_status(path: Path, now: datetime) -> dict[str, Any]:
+    tokens = FileTokenStore(path).load()
+    access_left = (tokens.access_expires_at - now).total_seconds() if tokens.access_expires_at else None
+    refresh_left = (tokens.refresh_expires_at - now).total_seconds() if tokens.refresh_expires_at else None
+    return {
+        "store": "file",
+        "tokens_file": str(path),
+        "exported_at": _iso(tokens.exported_at),
+        "access_token": {
+            "expires_at": _iso(tokens.access_expires_at),
+            "expired": tokens.is_access_expired(now),
+            "seconds_remaining": max(0, int(access_left)) if access_left is not None else None,
+        },
+        "refresh_token": {
+            "present": tokens.refresh_token is not None,
+            "expires_at": _iso(tokens.refresh_expires_at),
+            "expired": tokens.is_refresh_expired(now),
+            "days_remaining": round(max(0.0, refresh_left) / 86400, 1) if refresh_left is not None else None,
+        },
+        "jwt": {"present": tokens.jwt is not None, "expires_at": _iso(tokens.jwt_expires_at())},
+    }
+
+
+@auth_app.command("login")
+def auth_login(ctx: typer.Context) -> None:
+    """Sign in with usuario + password + SMS code, and save the token set (no browser)."""
+    # Prompts go to stderr so stdout stays pure JSON.
+    username = typer.prompt("Usuario (móvil o email)", err=True)
+    password = typer.prompt("Contraseña", hide_input=True, err=True)
+
+    def request_code() -> str:
+        typer.echo("Te hemos enviado un código por SMS.", err=True)  # fixed text: none from the server
+        return typer.prompt("Código SMS", hide_input=True, err=True)  # a live second factor: never echoed
+
+    store = FileTokenStore(ctx.obj.tokens_path)
+    _emit(lambda: auth.login(store, username, password, request_code).model_dump(mode="json"))
+
+
 @auth_app.command("refresh")
-def auth_refresh() -> None:
-    """Not implemented yet: the web app's refresh request has not been captured."""
-    _fail(
-        NotCapturedError(
-            "auth refresh is not implemented: the web app's refresh request has not been captured, and the "
-            "standard OAuth2 refresh body (grant_type=refresh_token, refresh_token, client_id) was refused by "
-            "the token endpoint with HTTP 403 (see README, Limitations); re-export "
-            ".local-secrets/tokens.json from a logged-in browser instead"
-        )
-    )
+def auth_refresh(ctx: typer.Context) -> None:
+    """Exchange the refresh token for a new access token and save it to the token file."""
+    _emit(lambda: auth.refresh(FileTokenStore(ctx.obj.tokens_path)).model_dump(mode="json"))
 
 
 @app.command("mcp")

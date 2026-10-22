@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from vodafone import api
-from vodafone.client import DxlClient
+from vodafone.client import DxlClient, describe_media_type
+from vodafone.output import render
 from vodafone.errors import (
     AccessDeniedError,
     ApiShapeError,
@@ -16,6 +17,7 @@ from vodafone.errors import (
     BlockedError,
     UpstreamError,
     UsageError,
+    VodafoneError,
 )
 from vodafone.tokens import TokenSet
 
@@ -88,11 +90,12 @@ def test_401_with_expired_token_means_reexport():
 
 def test_401_with_valid_token_is_a_resource_denial_not_a_relogin():
     body = {"message": "UNAUTHORIZED", "description": "Access is denied", "transactionId": "t-1"}
-    with _client(lambda r: _json(401, body)) as client:
+    seen = []
+    with _client(lambda r: seen.append(r) or _json(401, body)) as client:
         with pytest.raises(AccessDeniedError) as exc:
             client.get_json("/x")
     assert exc.value.exit_code == 3
-    assert exc.value.transaction_id == "t-1"
+    assert exc.value.transaction_id == seen[0].headers["vf-trace-transaction-id"]  # ours, not "t-1"
     assert "Access is denied" in exc.value.message
 
 
@@ -228,3 +231,126 @@ def test_invoices_query_the_jwt_document_with_the_process_header():
     assert (inv.id, inv.number, inv.amount, inv.net_amount, inv.currency, inv.issued_at) == (
         "F-1", "123", 45.10, 37.27, "EUR", "2001-02-03T00:00:00"
     )
+
+
+@pytest.mark.parametrize("raw", ["NaN", "nan", "Infinity", "-inf", "1e400", "-1e400"])
+def test_non_finite_numeric_strings_are_api_changed(raw):
+    with pytest.raises(ApiShapeError, match="finite"):
+        api._number(raw)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_render_refuses_non_standard_json(value):
+    with pytest.raises(ValueError):
+        render({"value": value})
+
+
+@pytest.mark.parametrize("body", [b'{"x": NaN}', b'{"x": Infinity}', b'{"x": -Infinity}', b'{"x": 1e400}'])
+def test_a_json_body_with_a_non_finite_number_is_api_changed(body):
+    resp = httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    with _client(lambda r: resp) as client:
+        with pytest.raises(ApiShapeError, match="non-finite"):
+            client.get_json("/x")
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
+@pytest.mark.parametrize("tid", [ACCESS, CSRF, DOCUMENT, ACCOUNT, "a1b2c3d4-0000-4000-8000-00000000000a", {"id": "t-1"}])
+def test_the_transaction_id_is_always_the_requests_own_trace_id(status, tid):
+    seen = []
+    with _client(lambda r: seen.append(r) or _json(status, {"transactionId": tid})) as client:
+        with pytest.raises(VodafoneError) as exc:
+            client.get_json("/x", {"nif": DOCUMENT, "customerAccountId": ACCOUNT})
+    assert exc.value.transaction_id == seen[0].headers["vf-trace-transaction-id"]
+    if isinstance(tid, str):
+        assert tid not in str(exc.value.to_dict())
+
+
+def test_a_get_error_never_echoes_the_query_values_it_sent():
+    document = "Pab12cD"  # few digits, so digit-run masking alone would not catch it
+    body = {"description": f"sin datos para {document} en {ACCOUNT}", "transactionId": document}
+    with _client(lambda r: _json(500, body)) as client:
+        with pytest.raises(UpstreamError) as exc:
+            client.get_json("/x", {"relatedParty.id": document, "billingAccountId": ACCOUNT})
+    rendered = str(exc.value.to_dict())
+    assert document not in rendered and ACCOUNT not in rendered
+    assert "sin datos para" in exc.value.message
+
+
+def test_a_download_error_never_echoes_the_download_token():
+    token = "f" * 64
+    body = {"message": f"no file for /v2/download/{token}"}
+    with _client(lambda r: _json(500, body)) as client:
+        with pytest.raises(UpstreamError) as exc:
+            client.get_bytes(f"/v2/download/{token}", label="/v2/download/{hash}")
+    assert token not in exc.value.message and "/v2/download/{hash}" in exc.value.message
+
+
+def test_a_non_json_body_names_a_fixed_media_type_label_never_the_header():
+    resp = httpx.Response(200, text="oops", headers={"content-type": f"text/plain; detail={ACCESS}; x={DOCUMENT}"})
+    with _client(lambda r: resp) as client:
+        with pytest.raises(ApiShapeError) as exc:
+            client.get_json("/x")
+    assert "(plain text)" in exc.value.message
+    assert ACCESS not in exc.value.message and DOCUMENT not in exc.value.message and "detail" not in exc.value.message
+
+
+@pytest.mark.parametrize(
+    ("content_type", "label"),
+    [
+        ("application/json; charset=utf-8", "JSON"),
+        ("application/vnd.vodafone.a42+json", "JSON"),
+        ("text/html", "HTML"),
+        ("application/pdf", "PDF"),
+        ("application/xml", "XML"),
+        ("text/plain; detail=s3cr3t", "plain text"),
+        ("", "no content type"),
+        ("s3cr3t-value", "another content type"),
+        ("application/octet-stream; name=s3cr3t.json", "another content type"),  # parameters are ignored
+    ],
+)
+def test_media_type_labels_are_fixed(content_type, label):
+    assert describe_media_type(content_type) == label
+
+
+def test_a_get_error_description_never_echoes_the_session_tokens():
+    body = {"description": f"denied for Bearer {ACCESS} csrf {CSRF}"}
+    with _client(lambda r: _json(401, body)) as client:
+        with pytest.raises(AccessDeniedError) as exc:
+            client.get_json("/x")
+    assert "denied for Bearer" in exc.value.message
+    assert ACCESS not in exc.value.message and CSRF not in exc.value.message
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "params", "shown"),
+    [
+        ("30", None, True),
+        ("3600", None, True),
+        ("3601", None, False),  # not a plausible back-off: could be anything
+        ("123456", None, False),  # e.g. an echoed OTP code
+        ("1234", {"line": "1234"}, False),  # equal to a sent value
+        ("12", {"customerAccountId": ACCOUNT[:4] + "12"}, False),  # part of a sent value
+        ("-1", None, False),
+    ],
+)
+def test_retry_after_is_shown_only_when_it_cannot_echo_a_sent_value(retry_after, params, shown):
+    resp = httpx.Response(429, json={}, headers={"retry-after": retry_after})
+    with _client(lambda r: resp) as client:
+        with pytest.raises(BlockedError) as exc:
+            client.get_json("/x", params)
+    assert (f"retry after {retry_after}s" in exc.value.message) is shown
+    assert shown or "back off" in exc.value.message
+
+
+def test_an_unparseable_number_is_not_echoed():
+    with pytest.raises(ApiShapeError) as exc:
+        api._number("Pab12cD")
+    assert "Pab12cD" not in exc.value.message
+
+
+def test_a_non_numeric_retry_after_is_not_echoed():
+    resp = httpx.Response(429, json={}, headers={"retry-after": f"later {ACCESS}"})
+    with _client(lambda r: resp) as client:
+        with pytest.raises(BlockedError) as exc:
+            client.get_json("/x")
+    assert ACCESS not in exc.value.message and "back off" in exc.value.message

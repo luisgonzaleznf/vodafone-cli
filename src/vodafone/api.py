@@ -4,7 +4,11 @@ Each public function returns an output model from models.py; the CLI and the MCP
 call these through run_with_client.
 """
 
+import errno
+import math
 import os
+import re
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -14,7 +18,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from . import config
-from .client import DxlClient
+from .client import DxlClient, describe_media_type
 from .errors import ApiShapeError, AuthError, UsageError, VodafoneError
 from .models import (
     Account,
@@ -51,6 +55,13 @@ T = TypeVar("T")
 _RELATED_PARTY_ID = "relatedParty[?(@.role=='Individual')].id"
 _BILL_PROCESS_HEADER = {"x-vf-api-process": "ConsultarEstadoFacturas"}
 
+# Bill fields that end up in a PDF's file name. ASCII-only ([0-9], not \d or isdigit()), and the bill
+# number is a single path component: no separators, no dots.
+_YEAR = re.compile(r"[0-9]{4}")
+_MONTH = re.compile(r"[0-9]{1,2}")
+_DATE_YEAR_MONTH = re.compile(r"([0-9]{4})-([0-9]{2})")
+_BILL_NO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
 
 def run_with_client(tokens_path: Path, fn: Callable[[DxlClient], T]) -> T:
     """Load the token set, open a DxlClient and call `fn` with it.
@@ -82,10 +93,14 @@ def _parse(model: type[T], data: Any, what: str) -> T:
 def _number(raw: str | None) -> float | None:
     if raw is None or raw == "":
         return None
+    # The value itself is not echoed: a response field can carry anything, e.g. a query value.
     try:
-        return float(raw.replace(",", "."))
+        value = float(raw.replace(",", "."))
     except ValueError:
-        raise ApiShapeError(f"expected a numeric string, got {raw!r}")
+        raise ApiShapeError("expected a numeric string in a numeric field")
+    if not math.isfinite(value):  # NaN / Infinity would make the output non-standard JSON
+        raise ApiShapeError("expected a finite number in a numeric field")
+    return value
 
 
 def _kind(service_type: str | None) -> str:
@@ -157,7 +172,9 @@ def get_me(client: DxlClient) -> MeOutput:
 def _user_profile(client: DxlClient) -> WireUserProfile:
     claims = client.tokens.claims()
     if not claims:
-        raise AuthError("the token set has no readable identity JWT (mcare-LocalStore.key.jwt); re-export tokens.json")
+        raise AuthError(
+            "the token set has no readable identity JWT (mcare-LocalStore.key.jwt); run `vodafone auth login`"
+        )
     return _parse(WireUserProfile, claims.get("userProfile"), "JWT userProfile")
 
 
@@ -283,27 +300,30 @@ def get_invoices(client: DxlClient, account_id: str | None = None) -> InvoicesOu
 # --- invoice PDFs ----------------------------------------------------------------------------------
 
 
-def _bill_month(bill: WireBillDocumentsItem) -> str | None:
-    cycle = bill.billingCycle
-    if cycle and cycle.billingYear and cycle.billingMonth and cycle.billingMonth.isdigit():
-        return f"{cycle.billingYear}-{int(cycle.billingMonth):02d}"
-    if bill.creationDate and len(bill.creationDate) >= 7:
-        return bill.creationDate[:7]
+def _year_month(year: str | None, month: str | None) -> str | None:
+    if year and month and _YEAR.fullmatch(year) and _MONTH.fullmatch(month) and 1 <= int(month) <= 12:
+        return f"{year}-{int(month):02d}"
     return None
 
 
-def _file_names(bills: list[WireBillDocumentsItem]) -> dict[str, str]:
-    """factura_YYYY-MM.pdf per bill number; bills sharing a month get a _<billNo> suffix."""
-    months = [_bill_month(b) for b in bills]
-    names = {}
-    for bill, month in zip(bills, months):
-        if month is None:
-            names[bill.billNo] = f"factura_{bill.billNo}.pdf"
-        elif months.count(month) > 1:
-            names[bill.billNo] = f"factura_{month}_{bill.billNo}.pdf"
-        else:
-            names[bill.billNo] = f"factura_{month}.pdf"
-    return names
+def _bill_month(bill: WireBillDocumentsItem) -> str | None:
+    """YYYY-MM from the billing cycle, else from the creation date. A value of any other shape is
+    ignored, since the month becomes part of a file name."""
+    cycle = bill.billingCycle
+    month = _year_month(cycle.billingYear, cycle.billingMonth) if cycle else None
+    if month is None and bill.creationDate:
+        parts = _DATE_YEAR_MONTH.match(bill.creationDate)
+        month = _year_month(*parts.groups()) if parts else None
+    return month
+
+
+def _file_name(bill: WireBillDocumentsItem) -> str:
+    """factura_YYYY-MM_<billNo>.pdf, or factura_<billNo>.pdf without a billing month. The bill number
+    makes each invoice's name unique, so invoices of different accounts never share a file."""
+    if not _BILL_NO.fullmatch(bill.billNo):
+        raise ApiShapeError("a bill number has characters that are not safe in a file name")
+    month = _bill_month(bill)
+    return f"factura_{month}_{bill.billNo}.pdf" if month else f"factura_{bill.billNo}.pdf"
 
 
 def _select_bills(bills: list[WireBillDocumentsItem], target: str) -> list[WireBillDocumentsItem]:
@@ -331,13 +351,38 @@ def _download_path(bill: WireBillDocumentsItem) -> str:
     return url.path
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.part")
+def _write_new(path: Path, data: bytes) -> bool:
+    """Write `data` to `path` unless something is already there; False if something is.
+
+    The bytes go to a unique temp file created exclusively (mkstemp, mode 0600: invoices carry the
+    holder's name, address and NIF) and synced; only then is it hard-linked into place. link()
+    publishes the complete file under its final name in one step and never replaces an existing
+    entry, file or symlink. A filesystem without hard links (FAT, some network shares) has no such
+    operation, so the save is refused rather than risk a partial or overwritten file.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
     try:
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            reason = errno.errorcode.get(exc.errno, type(exc).__name__) if exc.errno else type(exc).__name__
+            raise UsageError(
+                f"cannot save {path.name} without risking a partial or overwritten file: the filesystem "
+                f"refused a hard link ({reason}); choose a --dir on a filesystem with hard links"
+            ) from None
+        return True
     finally:
-        tmp.unlink(missing_ok=True)
+        os.unlink(tmp)
+
+
+def _size(path: Path) -> int:
+    return path.stat().st_size if path.exists() else 0
 
 
 def download_invoices(
@@ -355,29 +400,35 @@ def download_invoices(
         b for b in _parse(WireBillDocuments, data, "customerBills").items
         if b.billingAccount is None or b.billingAccount.id in (None, acct)
     ]
-    names = _file_names(bills)
     selected = _select_bills(bills, target)
+    # Every name is checked before anything is downloaded or written.
+    paths = {bill.billNo: directory / _file_name(bill) for bill in selected}
+    if any(path.parent != directory for path in paths.values()):  # backstop: _file_name is one component
+        raise ApiShapeError("an invoice file name would leave the output directory")
 
     directory.mkdir(parents=True, exist_ok=True)
     results: list[InvoiceFile] = []
     fetched = 0
     for bill in selected:
-        path = directory / names[bill.billNo]
+        path = paths[bill.billNo]
         month = _bill_month(bill)
-        if path.exists():
-            results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=path.stat().st_size, status="skipped"))
+        if path.exists() or path.is_symlink():
+            results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=_size(path), status="skipped"))
             continue
         if fetched:
             time.sleep(config.DOWNLOAD_SPACING)
         try:
             body, content_type = client.get_bytes(_download_path(bill), label="/v2/download/{hash}")
             if "pdf" not in content_type or not body.startswith(b"%PDF-"):
-                raise ApiShapeError(f"invoice {bill.billNo} download did not return a PDF ({content_type or 'no content type'})")
-            _write_atomic(path, body)
+                raise ApiShapeError(f"invoice {bill.billNo} download did not return a PDF ({describe_media_type(content_type)})")
+            saved = _write_new(path, body)
         except VodafoneError as err:
             done = [r.file for r in results if r.status == "downloaded"]
             err.message = f"{err.message} (stopped at invoice {bill.billNo}; downloaded before stopping: {done or 'none'})"
             raise
         fetched += 1
-        results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=len(body), status="downloaded"))
+        if saved:
+            results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=len(body), status="downloaded"))
+        else:  # the file appeared during the download; it is left as is
+            results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=_size(path), status="skipped"))
     return DownloadOutput(account_id=acct, directory=str(directory), invoices=results)

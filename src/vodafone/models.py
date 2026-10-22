@@ -4,11 +4,22 @@
 The snake_case output models define the stable JSON the CLI prints.
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Wire(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
+
+
+# --- OAuth2 token endpoint (password / authorization_code / refresh_token grants) --------------
+
+
+class WireTokenResponse(Wire):
+    access_token: str = Field(pattern=r"^[!-~]+$")  # sent as a bearer header: non-blank, visible ASCII
+    expires_at: str | None = None  # epoch seconds, as a string
+    expires_in: str | int | None = None
+    refresh_token: str | None = None
+    refresh_token_expires: str | None = None  # epoch seconds, as a string
 
 
 # --- /v2/customer/customerAccounts[?fields=debtAmount] ---------------------------------------
@@ -286,3 +297,18 @@ class DownloadOutput(BaseModel):
     account_id: str
     directory: str
     invoices: list[InvoiceFile]
+
+
+class LoginOutput(BaseModel):
+    tokens_file: str
+    access_token_expires_at: str
+    refresh_token_expires_at: str | None
+    jwt_fetched: bool
+
+
+class RefreshOutput(BaseModel):
+    tokens_file: str
+    access_token_expires_at: str
+    refresh_token_rotated: bool
+    refresh_token_expires_at: str | None
+    jwt_refreshed: bool
