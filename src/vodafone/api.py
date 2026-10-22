@@ -289,8 +289,10 @@ def get_invoices(client: DxlClient, account_id: str | None = None) -> InvoicesOu
                 type=bill.type,
                 issued_at=details.chargeDateTime.value if details and details.chargeDateTime else None,
                 due_at=details.dueDateTime.value if details and details.dueDateTime else None,
-                amount=_number(amounts.amount.value) if amounts and amounts.amount else None,
-                net_amount=_number(amounts.netAmount.value) if amounts and amounts.netAmount else None,
+                # DXL's netAmount is the total with IVA and its amount the base (live: total = 1.21 x
+                # base on every bill), the reverse of what "net" means, so they are swapped here.
+                amount=_number(amounts.netAmount.value) if amounts and amounts.netAmount else None,
+                net_amount=_number(amounts.amount.value) if amounts and amounts.amount else None,
                 currency=amounts.amount.currencyID if amounts and amounts.amount else None,
             )
         )

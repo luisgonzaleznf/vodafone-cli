@@ -52,7 +52,7 @@ ROUTES = {
             "extraId": [{"value": "123"}],
             "status": "settled",
             "details": {"chargeDateTime": {"value": "2001-02-03T00:00:00"}, "dueDateTime": {"value": "2001-02-20T00:00:00"}},
-            "amountsDue": {"amount": {"value": "45.10", "currencyID": "EUR"}, "netAmount": {"value": "37.27"}},
+            "amountsDue": {"amount": {"value": "37.27", "currencyID": "EUR"}, "netAmount": {"value": "45.10"}},
         }
     ],
 }
