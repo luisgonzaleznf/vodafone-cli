@@ -27,6 +27,8 @@ import hashlib
 import hmac
 import html
 import secrets
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -172,6 +174,7 @@ class SignIn:
             self._stopped = True
         self._timer.cancel()
         self._httpd.shutdown()
+        self._httpd.server_close()  # the port is closed when stop() returns
         self._flow = auth.LoginFlow(self.store)  # drop the first-factor token and cookies
 
     # --- requests ----------------------------------------------------------------------------
@@ -444,3 +447,26 @@ class SignInManager:
             if self._current is not None:
                 self._current.stop()
                 self._current = None
+
+
+def open_browser(url: str, timeout: float = 10.0) -> bool:
+    """webbrowser.open(url) in a child Python whose output goes to /dev/null, so whatever launcher
+    it picks (osascript, xdg-open, a browser binary) can't write to the MCP stdio channel. The URL
+    goes to the child on stdin, not in its argv, which other local users can list. True if a
+    browser was started."""
+    try:
+        child = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import sys, webbrowser; sys.exit(not webbrowser.open(sys.stdin.read()))"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return False
+    try:
+        child.communicate(url.encode(), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        return False
+    return child.returncode == 0

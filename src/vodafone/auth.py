@@ -21,7 +21,16 @@ from pydantic import ValidationError
 from . import config
 from .client import DxlClient
 from .errors import ApiShapeError, AuthError, NotSignedInError, VodafoneError
-from .models import LoginOutput, RefreshOutput, WireTokenResponse
+from .models import (
+    AccessTokenStatus,
+    AuthStatusOutput,
+    JwtStatus,
+    LoginOutput,
+    RefreshOutput,
+    RefreshTokenStatus,
+    TokenStatusOutput,
+    WireTokenResponse,
+)
 from .tokens import FileTokenStore, TokenSet
 
 # The identity JWT is the bare value of the `authorization` response header here (not the grant's jws).
@@ -380,3 +389,54 @@ def _refresh(store: FileTokenStore, tokens: TokenSet) -> RefreshOutput:
         refresh_token_expires_at=_iso(final.refresh_expires_at) if final.refresh_expires_at else None,
         jwt_refreshed=jwt_refreshed,
     )
+
+
+# --- status (offline: never refreshes) ------------------------------------------------------------
+
+
+def _iso_or_none(dt: datetime | None) -> str | None:
+    return dt.astimezone(UTC).isoformat() if dt else None
+
+
+def token_status(store: FileTokenStore, now: datetime) -> TokenStatusOutput:
+    """`vodafone auth status`: the token set's expiry times. Offline; never refreshes."""
+    tokens = store.load()
+    access_left = (tokens.access_expires_at - now).total_seconds() if tokens.access_expires_at else None
+    refresh_left = (tokens.refresh_expires_at - now).total_seconds() if tokens.refresh_expires_at else None
+    return TokenStatusOutput(
+        store="file",
+        tokens_file=str(store.path),
+        exported_at=_iso_or_none(tokens.exported_at),
+        access_token=AccessTokenStatus(
+            expires_at=_iso_or_none(tokens.access_expires_at),
+            expired=tokens.is_access_expired(now),
+            seconds_remaining=max(0, int(access_left)) if access_left is not None else None,
+        ),
+        refresh_token=RefreshTokenStatus(
+            present=tokens.refresh_token is not None,
+            expires_at=_iso_or_none(tokens.refresh_expires_at),
+            expired=tokens.is_refresh_expired(now),
+            days_remaining=round(max(0.0, refresh_left) / 86400, 1) if refresh_left is not None else None,
+        ),
+        jwt=JwtStatus(present=tokens.jwt is not None, expires_at=_iso_or_none(tokens.jwt_expires_at())),
+    )
+
+
+def sign_in_status(store: FileTokenStore, now: datetime) -> AuthStatusOutput:
+    """The MCP server's auth_status: token_status plus whether reads can run, i.e. the access token
+    is valid or a refresh token can renew it. A missing or unreadable token file means not signed
+    in, which is an answer, not an error. Offline; never refreshes."""
+    try:
+        status = token_status(store, now)
+    except NotSignedInError as err:
+        return AuthStatusOutput(
+            signed_in=False, reason=err.reason, store="file", tokens_file=str(store.path),
+            exported_at=None, access_token=None, refresh_token=None, jwt=None,
+        )
+    reason = None
+    if status.access_token.expired:
+        if not status.refresh_token.present:
+            reason = "the access token expired and there is no refresh token to renew it"
+        elif status.refresh_token.expired:
+            reason = "the access token and the refresh token have expired"
+    return AuthStatusOutput(signed_in=reason is None, reason=reason, **dict(status))

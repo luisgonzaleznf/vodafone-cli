@@ -111,15 +111,18 @@ async def _call(tokens_file, tool, arguments=None, **server_kwargs):
 
 
 @pytest.mark.anyio
-async def test_exposes_exactly_the_four_read_only_tools(tokens_file):
+async def test_exposes_the_four_read_tools_plus_auth_status_and_login(tokens_file):
     async with Client(build_server(tokens_file)) as client:
-        tools = (await client.list_tools()).tools
+        tools = {t.name: t for t in (await client.list_tools()).tools}
 
-    assert {t.name for t in tools} == set(TOOL_NAMES) == {"get_account", "list_lines", "get_usage", "list_invoices"}
-    for tool in tools:
-        assert tool.annotations.read_only_hint is True
+    assert set(tools) == set(TOOL_NAMES) == {"get_account", "list_lines", "get_usage", "list_invoices", "auth_status", "login"}
+    for name, tool in tools.items():
         assert tool.annotations.destructive_hint is False
-        assert tool.output_schema is not None
+        if name == "login":  # writes the local token file, nothing in the account
+            assert tool.annotations.read_only_hint is False and tool.output_schema is None
+        else:
+            assert tool.annotations.read_only_hint is True and tool.output_schema is not None
+    assert tools["auth_status"].annotations.open_world_hint is False  # offline
 
 
 @pytest.mark.anyio
