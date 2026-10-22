@@ -1,7 +1,8 @@
 """Typed errors. Each carries the CLI exit code it maps to.
 
 Messages must never contain token, csrf or cookie values, nor request query strings (they can hold
-the holder's NIF).
+the holder's NIF), nor server-supplied header values or ids. `transaction_id` is the
+vf-trace-transaction-id the client minted for the failing request, never a value from the server.
 """
 
 import re
@@ -44,14 +45,8 @@ class UsageError(VodafoneError):
     kind = "usage"
 
 
-class NotCapturedError(UsageError):
-    """A command whose request shape has not been captured yet."""
-
-    kind = "not_implemented"
-
-
 class AuthError(VodafoneError):
-    """401 with an expired (or missing) access token: re-export the token set."""
+    """401 with an expired (or missing) access token: run `vodafone auth login`."""
 
     exit_code = EXIT_AUTH
     kind = "auth_expired"

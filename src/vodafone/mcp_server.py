@@ -29,8 +29,8 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempot
 INSTRUCTIONS = (
     "Read-only access to the user's own Mi Vodafone (Vodafone España) account. Tools return the "
     "same JSON as the `vodafone` CLI. Failed calls return {\"error\": {\"type\", \"message\", "
-    "\"exit_code\", ...}}; type auth_expired means the token file must be re-exported from a "
-    "logged-in browser."
+    "\"exit_code\", ...}}; type auth_expired means the user must sign in again with "
+    "`vodafone auth login` (or re-export the token file from a logged-in browser)."
 )
 
 AccountArg = Annotated[
@@ -54,6 +54,10 @@ def _server_version() -> str:
         return ""
 
 
+def _error(err: VodafoneError) -> CallToolResult:
+    return CallToolResult(is_error=True, content=[TextContent(type="text", text=render_error(err))])
+
+
 def build_server(tokens_path: Path, default_account: str | None = None) -> MCPServer:
     server = MCPServer(name="vodafone", version=_server_version(), instructions=INSTRUCTIONS)
     # MCPServer configures root logging at INFO, where httpx logs every request URL (with account
@@ -64,11 +68,13 @@ def build_server(tokens_path: Path, default_account: str | None = None) -> MCPSe
     def call(fn: Callable[[DxlClient], BaseModel]) -> CallToolResult:
         with _serial:
             try:
-                result = api.run_with_client(tokens_path, fn)
+                payload = api.run_with_client(tokens_path, fn).model_dump(mode="json")
+                text = render(payload)
             except VodafoneError as err:
-                return CallToolResult(is_error=True, content=[TextContent(type="text", text=render_error(err))])
-        payload = result.model_dump(mode="json")
-        return CallToolResult(content=[TextContent(type="text", text=render(payload))], structured_content=payload)
+                return _error(err)
+            except Exception as exc:  # e.g. render() refusing a non-finite number
+                return _error(VodafoneError(f"unexpected internal error: {type(exc).__name__}"))
+        return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=payload)
 
     @server.tool(annotations=READ_ONLY)
     def get_account() -> Annotated[CallToolResult, MeOutput]:

@@ -9,6 +9,7 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 
 | Command | Description | Status |
 |---|---|---|
+| `vodafone auth login` | Sign in (usuario + password + SMS code) and save the token set | ✅ |
 | `vodafone me` | Customer account: status, segment, debt, flags, holder contact | ✅ |
 | `vodafone lines` | Every line (mobile, landline, fibre) with its tariff | ✅ |
 | `vodafone usage` | In-plan allowances (data / voice / SMS) per line | ✅ |
@@ -16,7 +17,7 @@ built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the sam
 | `vodafone mcp` | Read-only MCP server (stdio) exposing the read commands as tools | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
-| `vodafone auth refresh` | Refresh the access token | 🚧 not implemented (see [Limitations](#limitations)) |
+| `vodafone auth refresh` | Refresh the access token | ⚠️ refused by the endpoint (see [Limitations](#limitations)) |
 
 Write actions (add-ons, tariff changes, roaming, …) are out of scope for this release.
 
@@ -39,13 +40,25 @@ To put `vodafone` on your `PATH`, run `uv tool install --editable .`
 
 ## Authentication
 
-Mi Vodafone's login is protected by reCAPTCHA and an SMS one-time code, so the CLI never handles
-your password. Instead, you log in once in a browser and give the CLI the token set the web app
-keeps in `localStorage`:
+### Sign in (recommended)
 
-1. Log in at <https://m.vodafone.es/mves/login> (password + SMS code).
-2. Export the web app's `localStorage` values with the `mcare-LocalStore.key.` prefix into
-   `.local-secrets/tokens.json`. That path is gitignored; keep the file private.
+```bash
+vodafone auth login
+```
+
+Prompts for your usuario (mobile number or email) and password, sends an SMS code to one of your
+lines, and asks for it — the same sign-in as the web app, no browser. On success it writes the
+token set to the token file, and every other command works. The password and the SMS code are
+read with hidden prompts and are never stored or logged. No text from the server's SMS challenge
+is shown (the CLI prints a fixed "code sent" line), and auth errors name only a standard OAuth2
+error code (e.g. `invalid_grant`), never the endpoint's free-text message or headers, which could
+echo what was sent.
+
+### Browser token export (alternative)
+
+If you'd rather not type credentials into the CLI, log in at
+<https://m.vodafone.es/mves/login> and export the web app's `localStorage` values with the
+`mcare-LocalStore.key.` prefix into `.local-secrets/tokens.json`:
 
 ```jsonc
 {
@@ -59,21 +72,26 @@ keeps in `localStorage`:
 }
 ```
 
-The CLI looks for the file in this order:
+### Token file location
+
+The CLI looks for the file in this order, and `auth login` writes to the same place:
 
 1. `--tokens PATH`
 2. `$VODAFONE_TOKENS_FILE`
 3. `./.local-secrets/tokens.json`
 4. `.local-secrets/tokens.json` in the checkout
 
-Run `vodafone auth status` to see when the access token expires. Token refresh is not implemented
-yet (see [Limitations](#limitations)), so re-export the file when it does. Token values are never printed or logged.
+`auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
+renamed into place. Run `vodafone auth status` to see when the access token
+expires; while refresh is refused by the endpoint (see [Limitations](#limitations)), run
+`auth login` again when it does. Token values are never printed or logged.
 
 ## Usage
 
 Every command writes JSON to stdout.
 
 ```bash
+vodafone auth login           # sign in (usuario + password + SMS code); saves the token set
 vodafone auth status          # token expiry; exits 3 if the access token has expired
 vodafone me                   # account details
 vodafone lines                # lines and tariffs (same as `vodafone lines list`)
@@ -150,16 +168,22 @@ The JSON shapes are stable and defined by the output models in
   "account_id": "…",
   "directory": "facturas",
   "invoices": [
-    {"id": "…", "month": "2026-10", "file": "facturas/factura_2026-10.pdf", "bytes": 812345, "status": "downloaded"},
-    {"id": "…", "month": "2026-09", "file": "facturas/factura_2026-09.pdf", "bytes": 798112, "status": "skipped"}
+    {"id": "…", "month": "2026-10", "file": "facturas/factura_2026-10_<id>.pdf", "bytes": 812345, "status": "downloaded"},
+    {"id": "…", "month": "2026-09", "file": "facturas/factura_2026-09_<id>.pdf", "bytes": 798112, "status": "skipped"}
   ]
 }
 ```
 
-Invoice PDFs are saved as `factura_YYYY-MM.pdf` (by billing month; two bills in the same month get
-a `_<id>` suffix). Existing files are skipped, never overwritten. `all` downloads newest first,
-one at a time with a 2-second gap, because a burst of downloads stalls Vodafone's backend; it stops
-at the first failure and the error names the files saved so far.
+Invoice PDFs are saved as `factura_YYYY-MM_<id>.pdf`: billing month plus invoice id, so invoices of
+different accounts (or two bills in one month) never share a file. Without a billing month the
+name is `factura_<id>.pdf`; ids or dates that would not make a plain file name are rejected, so
+nothing is written outside `--dir`. Files are written with mode `0600`, and a PDF only appears under
+its final name once complete: it is written to a hidden temp file and hard-linked into place. On a
+filesystem without hard links (FAT, some network shares) the download stops with a `usage` error
+and writes nothing, rather than risk a partial or overwritten file; pick another `--dir`. Existing
+files (including one that appears during the download) are skipped, never overwritten. `all`
+downloads newest first, one at a time with a 2-second gap, because a burst of downloads stalls
+Vodafone's backend; it stops at the first failure and the error names the files saved so far.
 
 `unlimited: true` means there is no numeric cap; the totals then show whatever Vodafone reports
 (often `0` for voice and SMS). Vodafone itself publishes usage data with a 24–48 h delay.
@@ -169,18 +193,23 @@ at the first failure and the error names the files saved so far.
 Errors are written to stderr as JSON:
 
 ```json
-{"error": {"type": "access_denied", "message": "…", "exit_code": 3, "http_status": 401}}
+{"error": {"type": "access_denied", "message": "…", "exit_code": 3, "http_status": 401, "transaction_id": "…"}}
 ```
+
+`transaction_id`, when present, is the `vf-trace-transaction-id` the CLI generated for the failing
+request (a random UUID), for matching Vodafone-side logs. Error messages never echo a value the
+server sent back from the request (credentials, tokens, query values such as your NIF) nor raw
+response headers: such values are masked or replaced by fixed text.
 
 | Exit code | Error types | Meaning |
 |---|---|---|
 | 0 | | Success |
 | 1 | `internal` | Unexpected error (only the exception type is reported) |
-| 2 | `usage`, `not_implemented` | Invalid arguments (unknown line, unknown invoice id, …), or a command that is not implemented yet |
-| 3 | `auth_expired` | The access token expired or the token file is missing; re-export it |
+| 2 | `usage` | Invalid arguments (unknown line, unknown invoice id, …), or a `--dir` whose filesystem has no hard links |
+| 3 | `auth_expired` | The access token expired, or the token file is missing or malformed; run `vodafone auth login` |
 | 3 | `access_denied` | HTTP 401 while the token is still valid: that account or line was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot-protection page, 403 or 429; or a Vodafone 5xx, timeout or stall. Back off before retrying |
-| 7 | `api_changed` | Unexpected status or response shape; the API has probably changed |
+| 7 | `api_changed` | Unexpected status or response shape (including a non-finite number such as `NaN`, which is never written to the JSON output); the API has probably changed |
 
 Requests are sent one at a time with a short delay between them and are never retried
 automatically.
@@ -234,11 +263,12 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 
 ## Limitations
 
-- **`auth refresh`** is not implemented. The web app's own refresh request has not been
-  captured (a login never sends one), and the standard OAuth2 refresh body
-  (`grant_type=refresh_token`, `refresh_token`, `client_id`) was refused by the token endpoint with
-  HTTP 403. Until a real refresh request is captured, re-export the token file when the access
-  token expires (it lasts ~24 h).
+- **`auth refresh`** is implemented but currently refused by Vodafone. The standard OAuth2 refresh
+  request (`grant_type=refresh_token` + `refresh_token` + `client_id` + `scope`, with the same
+  headers as the password grant) is answered by the token endpoint with HTTP 403 `access_denied`.
+  The command makes one attempt, leaves the token file untouched on failure, and exits 3. Until the
+  exact refresh request the web app sends near the ~24 h access-token expiry is captured, use
+  `vodafone auth login` again instead (the access token lasts ~24 h).
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.
@@ -254,6 +284,7 @@ VODAFONE_LIVE=1 uv run pytest     # also runs read-only checks against your acco
 ```
 src/vodafone/
   cli.py          Typer app: commands, exit codes
+  auth.py         native login (password + SMS OTP) and token refresh
   mcp_server.py   read-only stdio MCP server (vodafone mcp)
   api.py          read operations (account, lines, usage, invoices)
   client.py       DxlClient: headers, pacing, HTTP error mapping
@@ -262,7 +293,7 @@ src/vodafone/
   tokens.py       token-set loading and expiry checks
   errors.py       typed errors and exit codes
   config.py       hosts, header constants, token-file lookup
-tests/            unit tests (CLI, client, invoices, MCP server) and opt-in live tests
+tests/            unit tests (auth, token store, CLI, client, invoices, MCP server) and opt-in live tests
 ```
 
 ## Disclaimer
