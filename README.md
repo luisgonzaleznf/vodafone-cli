@@ -23,20 +23,98 @@ Write actions (add-ons, tariff changes, roaming, …) are out of scope for this 
 
 ## Requirements
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
 - A Mi Vodafone account you can log in to in a browser
+- macOS or Linux. Homebrew brings its own Python; the install script and `uv tool install` use
+  [uv](https://docs.astral.sh/uv/), which fetches Python 3.12+ if you don't have it. Working from
+  source needs Python 3.12+ and uv.
 
 ## Installation
+
+Pick one; each puts a `vodafone` command on your `PATH`. Check it with `vodafone --version`, then
+[sign in](#authentication) with `vodafone auth login`.
+
+> **While the repository is private**, every method fetches it from GitHub with your own git
+> credentials, and two steps need a workaround (noted below). Once it is public, the commands work
+> as written with no credentials.
+
+### Homebrew
+
+This repository is its own Homebrew tap (the formula is [`Formula/vodafone.rb`](Formula/vodafone.rb)):
+
+```bash
+brew tap luisgonzaleznf/vodafone-cli https://github.com/luisgonzaleznf/vodafone-cli
+brew install luisgonzaleznf/vodafone-cli/vodafone
+```
+
+Upgrade with `brew update && brew upgrade luisgonzaleznf/vodafone-cli/vodafone`. The formula
+installs the release's exact dependency set from `uv.lock` (prebuilt wheels, no Rust toolchain)
+into its own virtualenv on Homebrew's Python 3.14.
+
+*While private:* `brew tap` clones with your usual git credentials (an https credential helper,
+or the SSH URL `git@github.com:luisgonzaleznf/vodafone-cli.git` if you have an SSH key on GitHub).
+`brew install` and `brew upgrade` then fetch the source inside Homebrew's sandbox, which cannot
+read the macOS keychain, so let git get the token from the GitHub CLI and hand it to Homebrew:
+
+```bash
+gh auth setup-git    # once: git asks `gh` for github.com credentials
+HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)" brew install luisgonzaleznf/vodafone-cli/vodafone
+```
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luisgonzaleznf/vodafone-cli/main/install.sh | sh
+```
+
+[`install.sh`](install.sh) installs uv with Astral's official installer if it is missing, then runs
+`uv tool install` for the pinned release, so `vodafone` lands in uv's tool bin directory (usually
+`~/.local/bin`). Running it again is safe: the same release is left as it is. It never replaces an
+editable (development) install unless asked to. Environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VODAFONE_CLI_VERSION` | the current release | Release to install; installs the tag `v<version>` |
+| `VODAFONE_CLI_REF` | `v$VODAFONE_CLI_VERSION` | Any git ref instead (branch, tag or commit) |
+| `VODAFONE_CLI_SOURCE` | `https://github.com/luisgonzaleznf/vodafone-cli.git` | Repository URL, e.g. `ssh://git@github.com/luisgonzaleznf/vodafone-cli.git`. Only plain `https://`, `ssh://` and `file://` URLs are accepted (no password, token, query or fragment); let a git credential helper supply credentials |
+| `VODAFONE_CLI_FORCE` | unset | `1` replaces an editable install, or another `vodafone` in uv's bin directory |
+
+uv's own variables (`UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, …) apply as usual, and so do the uv
+installer's (`UV_INSTALL_DIR`, `UV_UNMANAGED_INSTALL`, `XDG_BIN_HOME`, …): the script looks for a
+freshly installed uv where the installer put it.
+
+*While private:* `raw.githubusercontent.com` answers 404, so fetch the script through the GitHub
+CLI instead (uv then clones the repository with your git credentials):
+
+```bash
+gh api -H 'Accept: application/vnd.github.raw' repos/luisgonzaleznf/vodafone-cli/contents/install.sh | sh
+```
+
+### uv tool install
+
+```bash
+uv tool install git+https://github.com/luisgonzaleznf/vodafone-cli@v0.1.0
+```
+
+This is what the install script runs. To move to another release, run it again with that tag.
+Unlike Homebrew, `uv tool install` (and so the install script) resolves dependencies within the
+ranges in `pyproject.toml` at install time rather than using `uv.lock`'s exact versions.
+
+### From source (development)
 
 ```bash
 git clone https://github.com/luisgonzaleznf/vodafone-cli.git
 cd vodafone-cli
 uv sync
 uv run vodafone --help
+uv tool install --editable .    # optional: put this checkout's `vodafone` on your PATH
 ```
 
-To put `vodafone` on your `PATH`, run `uv tool install --editable .`
+An editable install runs the checkout's code, so changes apply without reinstalling.
+
+If more than one copy is installed, the first `vodafone` on your `PATH` wins (`which -a vodafone`):
+uv tools live in `~/.local/bin`, Homebrew's in `$(brew --prefix)/bin`. To uninstall, run
+`brew uninstall vodafone && brew untap luisgonzaleznf/vodafone-cli` or `uv tool uninstall vodafone-cli`;
+neither removes your token file.
 
 ## Authentication
 
@@ -78,8 +156,11 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
 
 1. `--tokens PATH`
 2. `$VODAFONE_TOKENS_FILE`
-3. `./.local-secrets/tokens.json`
-4. `.local-secrets/tokens.json` in the checkout
+3. `./.local-secrets/tokens.json`, if it exists
+4. When running from a source checkout (`uv run`, or an editable install): `.local-secrets/tokens.json`
+   in the checkout
+5. Otherwise (Homebrew, the install script, `uv tool install`): `~/.config/vodafone-cli/tokens.json`,
+   or `$XDG_CONFIG_HOME/vodafone-cli/tokens.json` when `XDG_CONFIG_HOME` is set
 
 `auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
 renamed into place. Run `vodafone auth status` to see when the access token
@@ -88,9 +169,10 @@ expires; while refresh is refused by the endpoint (see [Limitations](#limitation
 
 ## Usage
 
-Every command writes JSON to stdout.
+Every command writes JSON to stdout (`--version` and `--help` print plain text).
 
 ```bash
+vodafone --version            # installed version, e.g. 0.1.0
 vodafone auth login           # sign in (usuario + password + SMS code); saves the token set
 vodafone auth status          # token expiry; exits 3 if the access token has expired
 vodafone me                   # account details
@@ -234,16 +316,32 @@ Claude Code or Claude Desktop can call the read commands as tools.
 - Tool calls run one at a time, and the token file is re-read on every call, so a re-exported
   file is picked up without restarting the server.
 
-The host starts the server from its own working directory, so pass the token file explicitly.
+An installed `vodafone` finds `~/.config/vodafone-cli/tokens.json` from any working directory.
+Hosts often start servers with a minimal `PATH`, so give them the absolute path (`which vodafone`).
 
 **Claude Code:**
+
+```bash
+claude mcp add vodafone -- "$(which vodafone)" mcp
+```
+
+**Claude Desktop and other hosts using a JSON config:**
+
+```json
+{
+  "mcpServers": {
+    "vodafone": {"command": "/opt/homebrew/bin/vodafone", "args": ["mcp"]}
+  }
+}
+```
+
+**From a checkout:** the host starts the server from its own working directory, so run it through
+uv and pass the token file explicitly:
 
 ```bash
 claude mcp add vodafone -- uv --directory /path/to/vodafone-cli run \
   vodafone --tokens /path/to/vodafone-cli/.local-secrets/tokens.json mcp
 ```
-
-**Claude Desktop and other hosts using a JSON config:**
 
 ```json
 {
@@ -279,7 +377,11 @@ If the host can't find `uv`, use its absolute path (`which uv`).
 uv sync
 uv run pytest                     # offline: mocked DXL API, synthetic data only
 VODAFONE_LIVE=1 uv run pytest     # also runs read-only checks against your account
+shellcheck install.sh
 ```
+
+Releases (version bump, tag, Homebrew formula, install script, PyPI) are described in
+[RELEASING.md](RELEASING.md).
 
 ```
 src/vodafone/
@@ -293,7 +395,9 @@ src/vodafone/
   tokens.py       token-set loading and expiry checks
   errors.py       typed errors and exit codes
   config.py       hosts, header constants, token-file lookup
-tests/            unit tests (auth, token store, CLI, client, invoices, MCP server) and opt-in live tests
+tests/            unit tests (auth, token store, CLI, client, invoices, MCP server, packaging) and opt-in live tests
+Formula/          Homebrew formula (this repository is its own tap)
+install.sh        curl | sh installer (uv tool install of the pinned release)
 ```
 
 ## Disclaimer

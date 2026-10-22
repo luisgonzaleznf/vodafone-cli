@@ -5,6 +5,23 @@ description = "JSON-first CLI for your own Mi Vodafone (Vodafone España) accoun
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [{ name = "luisgonzaleznf", email = "47302972+luisgonzaleznf@users.noreply.github.com" }]
+keywords = ["vodafone", "vodafone-espana", "mi-vodafone", "dxl", "cli", "json", "mcp", "mcp-server"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: Telephony",
+    "Topic :: Utilities",
+]
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
@@ -12,6 +29,12 @@ dependencies = [
     "pydantic>=2.14.1",
     "typer>=0.27.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/luisgonzaleznf/vodafone-cli"
+Source = "https://github.com/luisgonzaleznf/vodafone-cli"
+Issues = "https://github.com/luisgonzaleznf/vodafone-cli/issues"
+Changelog = "https://github.com/luisgonzaleznf/vodafone-cli/releases"
 
 [project.scripts]
 vodafone = "vodafone.cli:main"
@@ -22,6 +45,8 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "vodafone"
+# Never ship secrets or account data that ends up under src/ (the build backend ignores .gitignore).
+source-exclude = ["**/.local-secrets", "**/.env", "**/.env.*", "**/*.cookies", "**/*.har", "**/*.pdf", "**/*.part"]
 
 [dependency-groups]
 dev = [

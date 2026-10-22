@@ -2,10 +2,14 @@
 
 import base64
 import json
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+import vodafone
 from vodafone import api, cli
 from vodafone.tokens import FileTokenStore
 
@@ -124,3 +128,29 @@ def test_a_missing_token_file_points_at_native_login(tmp_path):
 
     assert result.exit_code == 3
     assert "vodafone auth login" in json.loads(result.stderr)["error"]["message"]
+
+
+def _pyproject_version() -> str:
+    return tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"]["version"]
+
+
+@pytest.mark.parametrize("args", [["--version"], ["--version", "me"], ["--tokens", "/nonexistent", "--version"]])
+def test_version_prints_the_package_version_and_exits(args, monkeypatch):
+    monkeypatch.setattr(api, "run_with_client", lambda *a: pytest.fail("--version must not run a command"))
+
+    result = CliRunner().invoke(cli.app, args)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{version('vodafone-cli')}\n"
+    assert version("vodafone-cli") == _pyproject_version()
+
+
+def test_version_without_installed_metadata_says_unknown(monkeypatch):
+    def missing(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr(vodafone, "version", missing)
+    result = CliRunner().invoke(cli.app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "unknown\n"

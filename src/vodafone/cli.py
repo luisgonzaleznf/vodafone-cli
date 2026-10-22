@@ -11,7 +11,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 from pydantic import BaseModel
 
-from . import api, auth
+from . import api, auth, package_version
 from .client import DxlClient
 from .config import TOKENS_FILE_ENV, default_tokens_path
 from .errors import EXIT_AUTH, VodafoneError
@@ -71,16 +71,29 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.astimezone(UTC).isoformat() if dt else None
 
 
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(package_version() or "unknown")
+        raise typer.Exit()
+
+
 @app.callback()
 def _root(
     ctx: typer.Context,
     tokens: Annotated[
         Path | None,
-        typer.Option(help=f"Token set export (default: ${TOKENS_FILE_ENV}, else .local-secrets/tokens.json)."),
+        typer.Option(
+            help=f"Token set export (default: ${TOKENS_FILE_ENV}, else .local-secrets/tokens.json, "
+            "else ~/.config/vodafone-cli/tokens.json)."
+        ),
     ] = None,
     account: Annotated[
         str | None, typer.Option(help="Customer account id, when the login has more than one.")
     ] = None,
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_print_version, is_eager=True, help="Print the version and exit."),
+    ] = False,
 ) -> None:
     ctx.obj = State(tokens_path=tokens or default_tokens_path(), account=account)
 

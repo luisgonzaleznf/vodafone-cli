@@ -8,7 +8,6 @@ with is_error set. No write tools.
 import logging
 import threading
 from collections.abc import Callable
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated
 
@@ -16,7 +15,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import api
+from . import api, package_version
 from .client import DxlClient
 from .errors import VodafoneError
 from .models import InvoicesOutput, LinesOutput, MeOutput, UsageOutput
@@ -47,19 +46,12 @@ LineArg = Annotated[
 _serial = threading.Lock()
 
 
-def _server_version() -> str:
-    try:
-        return version("vodafone-cli")
-    except PackageNotFoundError:
-        return ""
-
-
 def _error(err: VodafoneError) -> CallToolResult:
     return CallToolResult(is_error=True, content=[TextContent(type="text", text=render_error(err))])
 
 
 def build_server(tokens_path: Path, default_account: str | None = None) -> MCPServer:
-    server = MCPServer(name="vodafone", version=_server_version(), instructions=INSTRUCTIONS)
+    server = MCPServer(name="vodafone", version=package_version(), instructions=INSTRUCTIONS)
     # MCPServer configures root logging at INFO, where httpx logs every request URL (with account
     # ids and the holder's NIF in query strings) to the host's server log.
     for name in ("httpx", "httpcore"):
