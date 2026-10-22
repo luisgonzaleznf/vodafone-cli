@@ -33,10 +33,6 @@ Write actions (add-ons, tariff changes, roaming, …) are out of scope for this 
 Pick one; each puts a `vodafone` command on your `PATH`. Check it with `vodafone --version`, then
 [sign in](#authentication) with `vodafone auth login`.
 
-> **While the repository is private**, every method fetches it from GitHub with your own git
-> credentials, and two steps need a workaround (noted below). Once it is public, the commands work
-> as written with no credentials.
-
 ### Homebrew
 
 This repository is its own Homebrew tap (the formula is [`Formula/vodafone.rb`](Formula/vodafone.rb)):
@@ -49,16 +45,6 @@ brew install luisgonzaleznf/vodafone-cli/vodafone
 Upgrade with `brew update && brew upgrade luisgonzaleznf/vodafone-cli/vodafone`. The formula
 installs the release's exact dependency set from `uv.lock` (prebuilt wheels, no Rust toolchain)
 into its own virtualenv on Homebrew's Python 3.14.
-
-*While private:* `brew tap` clones with your usual git credentials (an https credential helper,
-or the SSH URL `git@github.com:luisgonzaleznf/vodafone-cli.git` if you have an SSH key on GitHub).
-`brew install` and `brew upgrade` then fetch the source inside Homebrew's sandbox, which cannot
-read the macOS keychain, so let git get the token from the GitHub CLI and hand it to Homebrew:
-
-```bash
-gh auth setup-git    # once: git asks `gh` for github.com credentials
-HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)" brew install luisgonzaleznf/vodafone-cli/vodafone
-```
 
 ### Install script
 
@@ -81,13 +67,6 @@ editable (development) install unless asked to. Environment variables:
 uv's own variables (`UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, …) apply as usual, and so do the uv
 installer's (`UV_INSTALL_DIR`, `UV_UNMANAGED_INSTALL`, `XDG_BIN_HOME`, …): the script looks for a
 freshly installed uv where the installer put it.
-
-*While private:* `raw.githubusercontent.com` answers 404, so fetch the script through the GitHub
-CLI instead (uv then clones the repository with your git credentials):
-
-```bash
-gh api -H 'Accept: application/vnd.github.raw' repos/luisgonzaleznf/vodafone-cli/contents/install.sh | sh
-```
 
 ### uv tool install
 

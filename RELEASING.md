@@ -68,15 +68,14 @@ users get the new formula with `brew update`, because a tap follows `main`.
 
 ```bash
 brew tap luisgonzaleznf/vodafone-cli https://github.com/luisgonzaleznf/vodafone-cli   # or: brew update
-brew audit --strict luisgonzaleznf/vodafone-cli/vodafone      # add --online once the repo is public
+brew audit --strict --online luisgonzaleznf/vodafone-cli/vodafone
 brew style luisgonzaleznf/vodafone-cli/vodafone
-HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)" brew install luisgonzaleznf/vodafone-cli/vodafone   # token: private repo only
+brew install luisgonzaleznf/vodafone-cli/vodafone
 brew test luisgonzaleznf/vodafone-cli/vodafone
 "$(brew --prefix)/bin/vodafone" --version
 ```
 
-Use `brew upgrade luisgonzaleznf/vodafone-cli/vodafone` (same token while private) when an older
-version is installed. Without a `revision:`, `brew audit --strict` reports "Git should specify a
+Use `brew upgrade luisgonzaleznf/vodafone-cli/vodafone` when an older version is installed. Without a `revision:`, `brew audit --strict` reports "Git should specify a
 full commit hash". `brew install` also upgrades outdated dependencies (`python@3.14`, …), as any
 install does. `"$(brew --prefix)/bin/vodafone"` is spelled out because an editable development
 install in `~/.local/bin` usually comes first on `PATH`.
@@ -87,21 +86,14 @@ Point uv's tool directories at a temporary directory so an existing install is n
 
 ```bash
 d=$(mktemp -d)
-gh api -H 'Accept: application/vnd.github.raw' repos/luisgonzaleznf/vodafone-cli/contents/install.sh \
+curl -fsSL https://raw.githubusercontent.com/luisgonzaleznf/vodafone-cli/main/install.sh \
   | UV_TOOL_DIR="$d/tools" UV_TOOL_BIN_DIR="$d/bin" sh
 "$d/bin/vodafone" --version
 ```
 
-Once the repository is public, use the real one-liner instead:
-`curl -fsSL https://raw.githubusercontent.com/luisgonzaleznf/vodafone-cli/main/install.sh | UV_TOOL_DIR="$d/tools" UV_TOOL_BIN_DIR="$d/bin" sh`.
+## Optional: a release tarball
 
-## Once the repository is public
-
-- `curl -fsSL https://raw.githubusercontent.com/luisgonzaleznf/vodafone-cli/main/install.sh | sh`
-  works; `brew install` and `brew upgrade` need no `HOMEBREW_GITHUB_API_TOKEN` or `gh auth setup-git`.
-  Remove the "While private" notes from the README.
-- Run `brew audit --strict --online`; it checks the homepage and source URL.
-- Optional: switch the formula from the git URL to the release tarball, which downloads faster and
+- Switch the formula from the git URL to the release tarball, which downloads faster and
   needs no git. Step 3 then updates `url` and `sha256` instead of `tag:` and `revision:`:
 
   ```ruby
@@ -114,8 +106,6 @@ Once the repository is public, use the real one-liner instead:
 The metadata is ready and `uv build` produces a clean sdist and wheel. At the time of writing both
 `vodafone-cli` (the distribution name) and `vodafone` (the import package and command name) are
 unregistered on PyPI; this project only needs `vodafone-cli`.
-
-When the repository is public:
 
 1. Create the project on PyPI, preferably with a
    [trusted publisher](https://docs.pypi.org/trusted-publishers/) (a GitHub Actions workflow) so
