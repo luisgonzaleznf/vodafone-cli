@@ -2,8 +2,8 @@
 
 A JSON-first command-line client for **your own** Mi Vodafone (Vodafone España) account. It talks
 directly to Vodafone's DXL REST API (`api.dxl.local.vodafone.es`) over plain HTTPS, so there is no
-browser or scraping at runtime, and its output is designed to be consumed by scripts and coding
-agents.
+browser or scraping at runtime. Its JSON output is designed for scripts and coding agents, and a
+built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the same data as tools.
 
 ## Features
 
@@ -13,6 +13,7 @@ agents.
 | `vodafone lines` | Every line (mobile, landline, fibre) with its tariff | ✅ |
 | `vodafone usage` | In-plan allowances (data / voice / SMS) per line | ✅ |
 | `vodafone auth status` | Access-token validity and refresh-token days remaining (offline) | ✅ |
+| `vodafone mcp` | Read-only MCP server (stdio) exposing the read commands as tools | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ⚠️ see [Limitations](#limitations) |
 | `vodafone invoices download` | Invoice PDFs | 🚧 not implemented |
 | `vodafone auth refresh` | Refresh the access token | 🚧 not implemented |
@@ -79,6 +80,7 @@ vodafone lines                # lines and tariffs (same as `vodafone lines list`
 vodafone usage                # allowances for every line
 vodafone usage --line 1234    # one line: full number / service id, or unique trailing digits
 vodafone invoices list        # invoices
+vodafone mcp                  # MCP server on stdio (see below)
 ```
 
 Global options:
@@ -165,6 +167,52 @@ Errors are written to stderr as JSON:
 Requests are sent one at a time with a short delay between them and are never retried
 automatically.
 
+## MCP server
+
+`vodafone mcp` runs a read-only Model Context Protocol server on stdio, so MCP hosts such as
+Claude Code or Claude Desktop can call the read commands as tools.
+
+| Tool | Arguments | Same output as |
+|---|---|---|
+| `get_account` | none | `vodafone me` |
+| `list_lines` | `account` (optional) | `vodafone lines` |
+| `get_usage` | `line`, `account` (both optional) | `vodafone usage [--line …]` |
+| `list_invoices` | `account` (optional) | `vodafone invoices list` |
+
+- Each tool returns the CLI's JSON, both as text and as structured content with an output schema.
+  A failed call is returned with `isError` set and the CLI's `{"error": {...}}` payload as its
+  text.
+- All tools are annotated read-only. No write tools are exposed.
+- Tool calls run one at a time, and the token file is re-read on every call, so a re-exported
+  file is picked up without restarting the server.
+
+The host starts the server from its own working directory, so pass the token file explicitly.
+
+**Claude Code:**
+
+```bash
+claude mcp add vodafone -- uv --directory /path/to/vodafone-cli run \
+  vodafone --tokens /path/to/vodafone-cli/.local-secrets/tokens.json mcp
+```
+
+**Claude Desktop and other hosts using a JSON config:**
+
+```json
+{
+  "mcpServers": {
+    "vodafone": {
+      "command": "uv",
+      "args": [
+        "--directory", "/path/to/vodafone-cli", "run", "vodafone",
+        "--tokens", "/path/to/vodafone-cli/.local-secrets/tokens.json", "mcp"
+      ]
+    }
+  }
+}
+```
+
+If the host can't find `uv`, use its absolute path (`which uv`).
+
 ## Limitations
 
 - **`invoices list`** queries the TMF678 bill endpoint
@@ -184,19 +232,21 @@ automatically.
 
 ```bash
 uv sync
-uv run pytest          # offline tests against httpx.MockTransport, synthetic data only
+uv run pytest          # offline: mocked DXL API, synthetic data only
 ```
 
 ```
 src/vodafone/
-  cli.py       Typer app: commands, JSON output, exit codes
-  api.py       read operations (account, lines, usage, invoices)
-  client.py    DxlClient: headers, pacing, HTTP error mapping
-  models.py    wire models (DXL responses) and output models (CLI JSON)
-  tokens.py    token-set loading and expiry checks
-  errors.py    typed errors and exit codes
-  config.py    hosts, header constants, token-file lookup
-tests/         unit tests
+  cli.py          Typer app: commands, exit codes
+  mcp_server.py   read-only stdio MCP server (vodafone mcp)
+  api.py          read operations (account, lines, usage, invoices)
+  client.py       DxlClient: headers, pacing, HTTP error mapping
+  models.py       wire models (DXL responses) and output models (CLI JSON)
+  output.py       JSON rendering shared by the CLI and the MCP server
+  tokens.py       token-set loading and expiry checks
+  errors.py       typed errors and exit codes
+  config.py       hosts, header constants, token-file lookup
+tests/            unit tests (CLI, client, MCP server)
 ```
 
 ## Disclaimer
