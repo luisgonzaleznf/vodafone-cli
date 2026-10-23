@@ -1,12 +1,11 @@
-# This repository doubles as its own Homebrew tap:
-#   brew tap luisgonzaleznf/vodafone-cli https://github.com/luisgonzaleznf/vodafone-cli
+# Homebrew formula for vodafone-cli (https://github.com/luisgonzaleznf/vodafone-cli):
 #   brew install luisgonzaleznf/vodafone-cli/vodafone
-# Releasing a new version (tag, then update `tag:` and `revision:` here): see RELEASING.md.
+# It is maintained in the vodafone-cli repository and copied to the tap repository,
+# luisgonzaleznf/homebrew-vodafone-cli, at each release: see RELEASING.md there.
 class Vodafone < Formula
   desc "JSON-first CLI for your own Mi Vodafone (Spain) account"
   homepage "https://github.com/luisgonzaleznf/vodafone-cli"
-  # A git URL, not a tarball: the checkout uses your git credentials, so the formula works the same
-  # while the repository is private and once it is public.
+  # The release tag, pinned to its commit.
   url "https://github.com/luisgonzaleznf/vodafone-cli.git",
       tag:      "v0.3.0",
       revision: "58ac7b5205995223c0fd9a23a47f0dcd37819fd8"

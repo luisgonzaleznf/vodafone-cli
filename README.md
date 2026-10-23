@@ -35,12 +35,14 @@ Pick one; each puts a `vodafone` command on your `PATH`. Check it with `vodafone
 
 ### Homebrew
 
-This repository is its own Homebrew tap (the formula is [`Formula/vodafone.rb`](Formula/vodafone.rb)):
-
 ```bash
-brew tap luisgonzaleznf/vodafone-cli https://github.com/luisgonzaleznf/vodafone-cli
 brew install luisgonzaleznf/vodafone-cli/vodafone
 ```
+
+The formula is maintained in this repository ([`Formula/vodafone.rb`](Formula/vodafone.rb)) and
+published to the tap repository
+[luisgonzaleznf/homebrew-vodafone-cli](https://github.com/luisgonzaleznf/homebrew-vodafone-cli),
+which is what lets Homebrew find it by name.
 
 Upgrade with `brew update && brew upgrade luisgonzaleznf/vodafone-cli/vodafone`. The formula
 installs the release's exact dependency set from `uv.lock` (prebuilt wheels, no Rust toolchain)
