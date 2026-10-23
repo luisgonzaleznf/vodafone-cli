@@ -23,3 +23,10 @@ def test_the_readme_install_lines_pin_the_pyproject_version():
 
     assert len(pins) >= 1  # the uv tool install line
     assert set(pins) <= {f"@v{version}", f'@v{version}",'}
+
+
+def test_the_formula_offers_a_daily_keepalive_refresh():
+    formula = (ROOT / "Formula" / "vodafone.rb").read_text()
+
+    assert 'run [opt_bin/"vodafone", "auth", "refresh"]' in formula
+    assert "run_type :interval" in formula and "interval 86400" in formula

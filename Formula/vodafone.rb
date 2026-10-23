@@ -26,6 +26,17 @@ class Vodafone < Formula
     bin.install_symlink libexec/"bin/vodafone"
   end
 
+  # Keep the session alive: every refresh also renews the refresh token for about 90 days, so a
+  # daily refresh means `vodafone auth login` (with its SMS code) is only needed again if Vodafone
+  # ends the session. Opt-in: `brew services start luisgonzaleznf/vodafone-cli/vodafone`.
+  service do
+    run [opt_bin/"vodafone", "auth", "refresh"]
+    run_type :interval
+    interval 86400
+    log_path var/"log/vodafone-keepalive.log"
+    error_log_path var/"log/vodafone-keepalive.log"
+  end
+
   test do
     assert_equal version.to_s, shell_output("#{bin}/vodafone --version").strip unless version.head?
     assert_match "auth", shell_output("#{bin}/vodafone --help")

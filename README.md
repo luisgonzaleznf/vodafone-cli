@@ -167,6 +167,33 @@ and sign-in holds a lock on `tokens.json.lock` (an empty file next to the token 
 created (a read-only folder), a read that needs a refresh exits 2. Token values are never printed
 or logged.
 
+### Staying signed in
+
+In practice every refresh also returns a new refresh token valid for about 90 days from that
+moment, so a session only ends if no command runs for 90 days, or if Vodafone ends it (after a
+password change, say). A daily scheduled refresh keeps it going:
+
+- **Homebrew:**
+
+  ```bash
+  brew services start luisgonzaleznf/vodafone-cli/vodafone
+  ```
+
+  This runs `vodafone auth refresh` right away and then once a day (on macOS through launchd,
+  which catches up after sleep; on Linux through a systemd timer). Each run appends the refresh's
+  JSON (expiry times only, no token values), or its error, to
+  `$(brew --prefix)/var/log/vodafone-keepalive.log`. Check it with `brew services info vodafone`, and
+  stop it with `brew services stop luisgonzaleznf/vodafone-cli/vodafone`.
+- **Install script or `uv tool install`:** add a cron entry with `crontab -e`, using the path that
+  `which vodafone` prints:
+
+  ```
+  17 9 * * * "$HOME/.local/bin/vodafone" auth refresh >/dev/null 2>&1
+  ```
+
+If a run fails with exit code 3 (`auth_expired`), Vodafone refused the session: sign in again with
+`vodafone auth login`. Exit code 5 means Vodafone was unreachable, and the next run tries again.
+
 ## Usage
 
 Every command writes JSON to stdout (`--version` and `--help` print plain text).
@@ -319,8 +346,8 @@ Download it." The agent runs `vodafone invoices list` and `vodafone invoices dow
   break before the data commands do; browser
   token export still works then. A failed refresh, automatic or not, leaves the token file
   untouched: a refused one exits 3, Vodafone being unavailable exits 5.
-- Sessions last as long as the refresh token, about 90 days, then need a new sign-in with an SMS
-  code.
+- A session ends when the refresh token expires, about 90 days after the last refresh (see
+  [Staying signed in](#staying-signed-in)), and then needs a new sign-in with an SMS code.
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.
