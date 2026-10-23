@@ -64,13 +64,18 @@ follow-up commit on `main` (directly or through a small PR):
 - `install.sh`: `DEFAULT_VERSION=X.Y.Z`
 - `uv run pytest tests/test_packaging.py`
 
-Until this lands, Homebrew and the install script keep installing the previous release. Homebrew
-users get the new formula with `brew update`, because a tap follows `main`.
+Then publish the formula to the tap repository, which is what `brew install
+luisgonzaleznf/vodafone-cli/vodafone` reads: copy `Formula/vodafone.rb` to `Formula/vodafone.rb` in
+[luisgonzaleznf/homebrew-vodafone-cli](https://github.com/luisgonzaleznf/homebrew-vodafone-cli) and
+push it to that repository's `main`. Keep the two files identical.
+
+Until both land, Homebrew and the install script keep installing the previous release. Homebrew
+users get the new formula with `brew update`, because a tap follows its repository's `main`.
 
 ## 4. Verify Homebrew
 
 ```bash
-brew tap luisgonzaleznf/vodafone-cli https://github.com/luisgonzaleznf/vodafone-cli   # or: brew update
+brew update                                                    # fetches the tap repository
 brew audit --strict --online luisgonzaleznf/vodafone-cli/vodafone
 brew style luisgonzaleznf/vodafone-cli/vodafone
 brew install luisgonzaleznf/vodafone-cli/vodafone
