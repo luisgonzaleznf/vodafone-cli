@@ -2,10 +2,9 @@
 
 A JSON-first command-line client for **your own** Mi Vodafone (Vodafone España) account. It talks
 directly to Vodafone's DXL REST API (`api.dxl.local.vodafone.es`) over plain HTTPS, so there is no
-browser or scraping at runtime. Its JSON output is designed for scripts and coding agents, and a
-built-in read-only [MCP](https://modelcontextprotocol.io) server exposes the same data as tools.
-Claude Code or Codex can run that server with [one command](#mcp-server), and you sign in from the
-chat through a page in your own browser.
+browser or scraping at runtime. Its JSON output is designed for scripts and coding agents: Claude
+Code, Codex and similar tools can run the commands directly (see
+[Using it from a coding agent](#using-it-from-a-coding-agent)).
 
 ## Features
 
@@ -16,7 +15,6 @@ chat through a page in your own browser.
 | `vodafone lines` | Every line (mobile, landline, fibre) with its tariff | ✅ |
 | `vodafone usage` | In-plan allowances (data / voice / SMS) per line | ✅ |
 | `vodafone auth status` | Access-token validity and refresh-token days remaining (offline) | ✅ |
-| `vodafone mcp` | Read-only MCP server (stdio): the read commands as tools, plus browser sign-in | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
 | `vodafone auth refresh` | Refresh the access token (and rotate the refresh token); reads do it automatically | ✅ |
@@ -33,8 +31,7 @@ Write actions (add-ons, tariff changes, roaming, …) are out of scope for this 
 ## Installation
 
 Pick one; each puts a `vodafone` command on your `PATH`. Check it with `vodafone --version`, then
-[sign in](#authentication) with `vodafone auth login`. To use only the MCP server, you can skip this:
-see [MCP server](#mcp-server).
+[sign in](#authentication) with `vodafone auth login`.
 
 ### Homebrew
 
@@ -74,7 +71,7 @@ freshly installed uv where the installer put it.
 ### uv tool install
 
 ```bash
-uv tool install git+https://github.com/luisgonzaleznf/vodafone-cli@v0.2.0
+uv tool install git+https://github.com/luisgonzaleznf/vodafone-cli@v0.3.0
 ```
 
 This is what the install script runs. To move to another release, run it again with that tag.
@@ -116,9 +113,6 @@ OAuth2 error code (e.g. `invalid_grant`) or Vodafone's numeric one (e.g. `ecode 
 a wrong usuario or password), never the endpoint's free-text message or headers, which could echo
 what was sent.
 
-With the [MCP server](#mcp-server) you can sign in from the chat instead: see
-[How sign-in works](#how-sign-in-works).
-
 ### Browser token export (alternative)
 
 If you'd rather not type credentials into the CLI, log in at
@@ -150,11 +144,10 @@ The CLI looks for the file in this order, and `auth login` writes to the same pl
    else `.local-secrets/tokens.json` in the checkout
 
 `auth login` writes it with mode `0600`, through a fresh private temp file that is atomically
-renamed into place. The MCP server's [browser sign-in](#how-sign-in-works) writes the same file.
-Run `vodafone auth status` to see when the access token expires (it never refreshes anything).
+renamed into place. Run `vodafone auth status` to see when the access token expires (it never refreshes anything).
 
-The access token lasts about 24 hours and the refresh token about 90 days. Every read command (and
-read tool) refreshes the access token first when it has expired or expires within a minute, if the
+The access token lasts about 24 hours and the refresh token about 90 days. Every read command
+refreshes the access token first when it has expired or expires within a minute, if the
 refresh token is still valid: two requests (the refresh grant, then the identity JWT), no SMS code,
 and the rotated tokens are saved to the file. `vodafone auth refresh` does the same on demand.
 
@@ -167,11 +160,39 @@ Otherwise:
 - Vodafone is unavailable or blocked the request: exit 5, as for any other request; try again
   later, the session is not lost.
 
-Since the CLI and several MCP hosts can run at once and the refresh token rotates, every refresh
+Since several commands can run at once (a script and a terminal, say) and the refresh token
+rotates, every refresh
 and sign-in holds a lock on `tokens.json.lock` (an empty file next to the token file, mode
 `0600`); a process that waited for it uses the tokens the other one saved. If that file can't be
 created (a read-only folder), a read that needs a refresh exits 2. Token values are never printed
 or logged.
+
+### Staying signed in
+
+In practice every refresh also returns a new refresh token valid for about 90 days from that
+moment, so a session only ends if no command runs for 90 days, or if Vodafone ends it (after a
+password change, say). A daily scheduled refresh keeps it going:
+
+- **Homebrew:**
+
+  ```bash
+  brew services start luisgonzaleznf/vodafone-cli/vodafone
+  ```
+
+  This runs `vodafone auth refresh` right away and then once a day (on macOS through launchd,
+  which catches up after sleep; on Linux through a systemd timer). Each run appends the refresh's
+  JSON (expiry times only, no token values), or its error, to
+  `$(brew --prefix)/var/log/vodafone-keepalive.log`. Check it with `brew services info vodafone`, and
+  stop it with `brew services stop luisgonzaleznf/vodafone-cli/vodafone`.
+- **Install script or `uv tool install`:** add a cron entry with `crontab -e`, using the path that
+  `which vodafone` prints:
+
+  ```
+  17 9 * * * "$HOME/.local/bin/vodafone" auth refresh >/dev/null 2>&1
+  ```
+
+If a run fails with exit code 3 (`auth_expired`), Vodafone refused the session: sign in again with
+`vodafone auth login`. Exit code 5 means Vodafone was unreachable, and the next run tries again.
 
 ## Usage
 
@@ -190,7 +211,6 @@ vodafone invoices list        # invoices
 vodafone invoices download            # latest invoice PDF into the current directory
 vodafone invoices download all --dir ~/facturas
 vodafone invoices download <id>       # one invoice; ids come from `invoices list`
-vodafone mcp                  # MCP server on stdio (see below)
 ```
 
 Global options:
@@ -306,120 +326,28 @@ Requests are sent one at a time with a short delay between them and are never re
 automatically. The only automatic requests are the refresh of an expiring access token before a
 read: the refresh grant and the identity JWT.
 
-## MCP server
+## Using it from a coding agent
 
-`vodafone mcp` runs a Model Context Protocol server on stdio, so Claude Code, Codex, Claude Desktop
-and other MCP hosts can read your account as tools, and sign you in from the chat. It needs
-[uv](https://docs.astral.sh/uv/) (`brew install uv`, or Astral's installer) and git, which uv uses
-to fetch the package (on macOS, `xcode-select --install` or `brew install git`); nothing else has
-to be installed first.
+Coding agents such as Claude Code or Codex can run `vodafone` like any other command and read its
+JSON. Install it ([Installation](#installation)), sign in once in a terminal with
+`vodafone auth login`, then ask, for example, "why is my last invoice higher than the previous one?
+Download it." The agent runs `vodafone invoices list` and `vodafone invoices download` itself.
 
-**Claude Code:**
-
-```bash
-claude mcp add --scope user vodafone -- uvx --from git+https://github.com/luisgonzaleznf/vodafone-cli@v0.2.0 vodafone mcp
-```
-
-**Codex:**
-
-```bash
-codex mcp add vodafone -- uvx --from git+https://github.com/luisgonzaleznf/vodafone-cli@v0.2.0 vodafone mcp
-```
-
-Then ask the assistant to sign in to Vodafone (see [below](#how-sign-in-works)). Each line pins a
-release: to upgrade, remove the server (`claude mcp remove --scope user vodafone`,
-`codex mcp remove vodafone`) and add it again with the new tag. The first start downloads and
-builds the package, which can take longer than a host waits for a new server. If the host reports
-a timeout, fill uv's cache once from a terminal, then restart the host:
-
-```bash
-uvx --from git+https://github.com/luisgonzaleznf/vodafone-cli@v0.2.0 vodafone --version
-```
-
-**With Homebrew** (or another [installation](#installation) that puts `vodafone` on your `PATH`):
-
-```bash
-claude mcp add --scope user vodafone -- vodafone mcp
-```
-
-**Claude Desktop and other hosts using a JSON config.** Such hosts often start servers with a
-minimal `PATH`, so give the absolute path of `uvx` (`which uvx`) or of `vodafone` (`which vodafone`):
-
-```json
-{
-  "mcpServers": {
-    "vodafone": {
-      "command": "/opt/homebrew/bin/uvx",
-      "args": ["--from", "git+https://github.com/luisgonzaleznf/vodafone-cli@v0.2.0", "vodafone", "mcp"]
-    }
-  }
-}
-```
-
-### How sign-in works
-
-- `vodafone mcp` is a local server, running on your own computer. There is no Authenticate button
-  for it in Claude Code's `/mcp`: that button is for remote servers that sign in with OAuth.
-- Ask Claude to sign in to Vodafone. It calls the `login` tool, and a sign-in page opens in your
-  browser. The page is served by the MCP server itself, at `http://127.0.0.1` on your machine.
-  Depending on the app, Claude either shows you the link and asks before opening it, or the browser
-  opens on its own and the link is also in the chat.
-- On that page you type your usuario and password, choose which line gets the SMS code, and type
-  the code. Your password and SMS code go from the page to Vodafone; they never pass through the
-  chat or the model.
-- The tokens are saved to `~/.config/vodafone-cli/tokens.json` (mode `0600`; see
-  [Token file location](#token-file-location) for other places) and renewed automatically, so the
-  tools keep working for about 90 days. After that, ask Claude to sign in again.
-- The CLI is optional: the MCP server needs neither `vodafone` on your `PATH` nor
-  `vodafone auth login`. Both use the same token file, so signing in with either works for both.
-
-The page works only from your computer, for 10 minutes, and for one sign-in; it loads nothing from
-the internet. Each link carries its own random secret, and only one sign-in runs at a time: asking
-again while one is open gives you the same link. Once a sign-in is over, its old link only shows a
-"link expired" or "signed in" notice. While a sign-in is in progress, `auth_status` reports
-`signed_in: false`.
-
-### Tools
-
-| Tool | Arguments | Same output as |
-|---|---|---|
-| `get_account` | none | `vodafone me` |
-| `list_lines` | `account` (optional) | `vodafone lines` |
-| `get_usage` | `line`, `account` (both optional) | `vodafone usage [--line …]` |
-| `list_invoices` | `account` (optional) | `vodafone invoices list` |
-| `auth_status` | none | `vodafone auth status`, plus `signed_in` and `reason` (offline) |
-| `login` | none | opens the browser sign-in |
-
-- Each read tool returns the CLI's JSON, both as text and as structured content with an output
-  schema. A failed call is returned with `isError` set and the CLI's `{"error": {...}}` payload
-  as its text. When you are not signed in (no token file, or a session that can't be renewed), the
-  error's type is `auth_expired` and its message points at the `login` tool.
-- The read tools and `auth_status` are annotated read-only. `login` is not, because it writes the
-  local token file, but it changes nothing in your Vodafone account. There are no write tools, and
-  invoice PDF downloads are CLI-only.
-- Tool calls run one at a time. The token file is re-read on every call, so a new sign-in or a
-  re-exported file is picked up without a restart, and an access token that is about to expire is
-  refreshed first.
-
-**Development, from a checkout:** the host starts the server from its own working directory, so
-run it through uv and pass the token file explicitly (use `uv`'s absolute path if the host can't
-find it):
-
-```bash
-claude mcp add vodafone -- uv --directory /path/to/vodafone-cli run \
-  vodafone --tokens /path/to/vodafone-cli/.local-secrets/tokens.json mcp
-```
+- Your password and SMS code are typed only into `vodafone auth login`, never into the chat.
+- Every command renews the session when it needs to (see [Token file location](#token-file-location)),
+  so the agent keeps working until the refresh token expires.
+- Every command is read-only: none of them changes anything in your account.
 
 ## Limitations
 
 - **Native authentication** reproduces the web app's requests: a `csrf-token` cookie matching the
   `vf-csrf-token` header, the session cookies the server sets during the SMS step, and the masked
-  number from the password grant as the SMS target. If Vodafone changes that flow, sign-in (in the
-  CLI and in the MCP server's browser page alike) may break before the data commands do; browser
+  number from the password grant as the SMS target. If Vodafone changes that flow, sign-in may
+  break before the data commands do; browser
   token export still works then. A failed refresh, automatic or not, leaves the token file
   untouched: a refused one exits 3, Vodafone being unavailable exits 5.
-- Sessions last as long as the refresh token, about 90 days, then need a new sign-in with an SMS
-  code.
+- A session ends when the refresh token expires, about 90 days after the last refresh (see
+  [Staying signed in](#staying-signed-in)), and then needs a new sign-in with an SMS code.
 - Tokens are read from a JSON file; OS keychain storage is planned.
 - This is an unofficial client of an undocumented API, so it may break whenever Vodafone changes
   its backend.
@@ -440,16 +368,14 @@ Releases (version bump, tag, Homebrew formula, install script, PyPI) are describ
 src/vodafone/
   cli.py          Typer app: commands, exit codes
   auth.py         native login (password + SMS OTP) in steps, token refresh and status
-  mcp_server.py   stdio MCP server (vodafone mcp): read tools, auth_status, login
-  signin.py       the MCP server's local browser sign-in page
   api.py          read operations (account, lines, usage, invoices)
   client.py       DxlClient: headers, pacing, HTTP error mapping
   models.py       wire models (DXL responses) and output models (CLI JSON)
-  output.py       JSON rendering shared by the CLI and the MCP server
+  output.py       JSON rendering of output and error payloads
   tokens.py       token-set loading, expiry checks and the token-file lock
   errors.py       typed errors and exit codes
   config.py       hosts, header constants, token-file lookup
-tests/            unit tests (auth, refresh, token store, CLI, client, invoices, sign-in page, MCP server, packaging) and opt-in live tests
+tests/            unit tests (auth, refresh, token store, CLI, client, invoices, install script, packaging) and opt-in live tests
 Formula/          Homebrew formula (this repository is its own tap)
 install.sh        curl | sh installer (uv tool install of the pinned release)
 ```

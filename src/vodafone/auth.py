@@ -2,8 +2,7 @@
 
 `login` reproduces the web app's sign-in: a password grant, the SMS-OTP second factor sent to one of
 the masked numbers the grant offers, then a fetch of the identity JWT — no browser. `LoginFlow` runs
-the same sign-in one step at a time, for the MCP server's browser page. `refresh`
-exchanges the stored refresh token for a new access token, and `ensure_fresh` does so automatically
+the same sign-in one step at a time. `refresh` exchanges the stored refresh token for a new access token, and `ensure_fresh` does so automatically
 before a read when the access token is about to expire. All of them write the token set the rest of
 the CLI reads, under the token file's lock; none ever logs a credential or token.
 """
@@ -24,7 +23,6 @@ from .client import DxlClient
 from .errors import ApiShapeError, AuthError, NotSignedInError, UsageError, VodafoneError
 from .models import (
     AccessTokenStatus,
-    AuthStatusOutput,
     JwtStatus,
     LoginOutput,
     RefreshOutput,
@@ -112,7 +110,7 @@ def _fetch_jwt(access_token: str, csrf: str, cookies: httpx.Cookies) -> str | No
 
 class LoginFlow:
     """The native sign-in as three resumable steps, for callers that collect the user's answers
-    between requests: the CLI's prompts, or the MCP server's browser page.
+    between requests, such as the CLI's prompts.
 
     `start` runs the password grant and returns the masked numbers it offers for the SMS code,
     `send_code` has the code sent to one of them, and `finish` exchanges the code and writes the
@@ -280,7 +278,7 @@ def _check_renewable(store: FileTokenStore, tokens: TokenSet) -> None:
 
 def ensure_fresh(store: FileTokenStore) -> TokenSet:
     """The stored token set, refreshed first if its access token has expired or expires within
-    REFRESH_MARGIN and a refresh token is present and unexpired. Used by every read (CLI and MCP);
+    REFRESH_MARGIN and a refresh token is present and unexpired. Used by every read command;
     `auth status` never calls it. A token whose expiry is unknown is used as it is.
 
     The refresh runs under the token file's lock, and the file is re-read once the lock is held:
@@ -445,27 +443,3 @@ def _token_status(store: FileTokenStore, tokens: TokenSet, now: datetime) -> Tok
         ),
         jwt=JwtStatus(present=tokens.jwt is not None, expires_at=_iso_or_none(tokens.jwt_expires_at())),
     )
-
-
-def sign_in_status(store: FileTokenStore, now: datetime) -> AuthStatusOutput:
-    """The MCP server's auth_status: token_status plus whether the read tools can run, i.e. the
-    access token is valid or a refresh token can renew it, and the identity JWT the line, usage and
-    invoice reads need is readable. A missing or unreadable token file means not signed in, which
-    is an answer, not an error. The reasons are the ones the read tools give. Offline; never
-    refreshes."""
-    try:
-        tokens = store.load()
-    except NotSignedInError as err:
-        return AuthStatusOutput(
-            signed_in=False, reason=err.reason, store="file", tokens_file=str(store.path),
-            exported_at=None, access_token=None, refresh_token=None, jwt=None,
-        )
-    status = _token_status(store, tokens, now)
-    reason = None
-    if status.access_token.expired and not status.refresh_token.present:
-        reason = "the access token expired and there is no refresh token to renew it"
-    elif status.access_token.expired and status.refresh_token.expired:
-        reason = "the access token and the refresh token have expired"
-    elif not tokens.claims():
-        reason = NO_IDENTITY
-    return AuthStatusOutput(signed_in=reason is None, reason=reason, **dict(status))

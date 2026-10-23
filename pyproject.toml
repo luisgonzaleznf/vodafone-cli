@@ -1,12 +1,12 @@
 [project]
 name = "vodafone-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "JSON-first CLI for your own Mi Vodafone (Vodafone España) account, over the DXL API"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "luisgonzaleznf", email = "47302972+luisgonzaleznf@users.noreply.github.com" }]
-keywords = ["vodafone", "vodafone-espana", "mi-vodafone", "dxl", "cli", "json", "mcp", "mcp-server"]
+keywords = ["vodafone", "vodafone-espana", "mi-vodafone", "dxl", "cli", "json"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -25,7 +25,6 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
-    "mcp>=2.3.0",
     "pydantic>=2.14.1",
     "typer>=0.27.3",
 ]

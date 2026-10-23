@@ -1,7 +1,7 @@
 """Read operations over DxlClient.
 
-Each public function returns an output model from models.py; the CLI and the MCP server both
-call these through run_with_client.
+Each public function returns an output model from models.py; the CLI calls these through
+run_with_client.
 """
 
 import errno
