@@ -212,14 +212,5 @@ def auth_refresh(ctx: typer.Context) -> None:
     _emit(lambda: auth.refresh(FileTokenStore(ctx.obj.tokens_path)).model_dump(mode="json"))
 
 
-@app.command("mcp")
-def mcp_command(ctx: typer.Context) -> None:
-    """Run the MCP server on stdio: read tools (get_account, list_lines, get_usage, list_invoices),
-    auth_status, and login (browser sign-in)."""
-    from .mcp_server import build_server  # deferred: the MCP SDK is only needed by this command
-
-    build_server(ctx.obj.tokens_path, ctx.obj.account).run("stdio")
-
-
 def main() -> None:
     app()

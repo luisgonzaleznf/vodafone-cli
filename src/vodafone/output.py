@@ -1,4 +1,4 @@
-"""JSON rendering shared by the CLI and the MCP server, so both emit byte-identical text.
+"""JSON rendering for the CLI's output and error payloads.
 
 Strict JSON: NaN/Infinity raise ValueError instead of being written as non-standard literals.
 """

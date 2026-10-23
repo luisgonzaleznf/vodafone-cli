@@ -1,5 +1,5 @@
 """The distribution files agree: install.sh and the Homebrew formula pin the same release, and the
-README's install lines pin the version in pyproject.toml."""
+README's install line pins the version in pyproject.toml."""
 
 import re
 import tomllib
@@ -21,5 +21,5 @@ def test_the_readme_install_lines_pin_the_pyproject_version():
     readme = (ROOT / "README.md").read_text()
     pins = re.findall(r"git\+https://github\.com/luisgonzaleznf/vodafone-cli(\S*)", readme)
 
-    assert len(pins) >= 4  # uv tool install, Claude Code, Codex, the cache warm-up, Claude Desktop
+    assert len(pins) >= 1  # the uv tool install line
     assert set(pins) <= {f"@v{version}", f'@v{version}",'}

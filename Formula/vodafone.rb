@@ -3,7 +3,7 @@
 #   brew install luisgonzaleznf/vodafone-cli/vodafone
 # Releasing a new version (tag, then update `tag:` and `revision:` here): see RELEASING.md.
 class Vodafone < Formula
-  desc "JSON-first CLI and MCP server for your own Mi Vodafone (Spain) account"
+  desc "JSON-first CLI for your own Mi Vodafone (Spain) account"
   homepage "https://github.com/luisgonzaleznf/vodafone-cli"
   # A git URL, not a tarball: the checkout uses your git credentials, so the formula works the same
   # while the repository is private and once it is public.

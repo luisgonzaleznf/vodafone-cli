@@ -99,8 +99,8 @@ class FileTokenStore:
     def lock(self) -> Iterator[None]:
         """Hold an exclusive flock on `<tokens file>.lock` (created empty, mode 0600).
 
-        Taken around every refresh and sign-in write: the CLI and any number of MCP servers can run
-        at once, and the refresh token rotates, so two of them must not spend it together. Readers
+        Taken around every refresh and sign-in write: several CLI processes can run at once, and
+        the refresh token rotates, so two of them must not spend it together. Readers
         don't lock (writes are atomic renames). The lock file is never removed, which would let two
         processes lock different files; the lock goes with the descriptor, also if the process dies.
         """
