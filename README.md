@@ -381,8 +381,40 @@ src/vodafone/
   config.py       hosts, header constants, token-file lookup
 tests/            unit tests (auth, refresh, token store, CLI, client, invoices, install script, packaging) and opt-in live tests
 Formula/          Homebrew formula (this repository is its own tap)
+.githooks/        personal-data check run before commits and PR text (see Contributing)
 install.sh        curl | sh installer (uv tool install of the pinned release)
 ```
+
+## Contributing
+
+This repository is public and the CLI runs against one real account, so that account's data (names,
+phone numbers and their masked forms, NIF, ids, invoice numbers, addresses, bill details) must never
+reach a commit, a commit message, or PR or issue text. A later deletion doesn't undo it: only a
+history rewrite does. Use obviously fake values in tests and docs (`600000001`, `00000000T`,
+`Ana Ejemplo`, `user@example.com`) and keep HAR captures, PDFs, token files and CLI output out of git.
+
+[`.githooks/pii_check.py`](.githooks/pii_check.py) enforces this before every commit (`pre-commit`,
+`commit-msg`) and, in Claude Code, before `gh pr`, `gh issue`, `gh release` or `gh api` text is posted
+([`.claude/settings.json`](.claude/settings.json), which also refuses `git commit --no-verify` and
+installs the git hooks on first use). It combines fixed patterns, a check against the account's known
+values, and Claude Haiku (through `ANTHROPIC_API_KEY` or your Claude Code login; when neither is
+available it prints a note and never blocks the commit). It reports where it found something, never
+the value.
+
+```bash
+python3 .githooks/pii_check.py enable          # once per clone: install the git hooks
+python3 .githooks/pii_check.py needles build   # once signed in: hash the account's values (rebuild after new invoices)
+python3 .githooks/pii_check.py files --patterns-only $(git ls-files)   # audit the tree without the model
+```
+
+`needles build` runs the installed `vodafone` CLI (`me`, `lines`, `invoices list`) and reads the token
+file's identity JWT, then stores only salted SHA-256 hashes of the values in
+`~/.config/vodafone-cli/pii-needles.json` (mode 600, outside every repo); it prints counts, never values.
+Without that file the known-values check is skipped with a note.
+
+If the check flags a line you are sure is synthetic, add `pii:allow` and a reason to that line (agents:
+ask the user first). `pii:allow` doesn't silence a known-value hit: that is the account's real data,
+even when it looks invented, so change the value instead.
 
 ## Disclaimer
 
