@@ -1,0 +1,3 @@
+#!/bin/sh
+# Personal-data check on the commit message.
+exec python3 "$(git rev-parse --show-toplevel)/.githooks/pii_check.py" msg "$1"

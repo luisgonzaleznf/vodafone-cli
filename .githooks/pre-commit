@@ -1,0 +1,7 @@
+#!/bin/sh
+# Personal-data check on the staged changes, plus gitleaks' secret check when it's installed and configured.
+root="$(git rev-parse --show-toplevel)"
+python3 "$root/.githooks/pii_check.py" staged || exit 1
+if command -v gitleaks >/dev/null 2>&1 && [ -f "$root/.gitleaks.toml" ]; then
+  gitleaks git --pre-commit --staged --redact --no-banner --config "$root/.gitleaks.toml" "$root" || exit 1
+fi
