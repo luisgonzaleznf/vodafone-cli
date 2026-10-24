@@ -72,6 +72,10 @@ push it to that repository's `main`. Keep the two files identical.
 Until both land, Homebrew and the install script keep installing the previous release. Homebrew
 users get the new formula with `brew update`, because a tap follows its repository's `main`.
 
+A formula-only change that doesn't change what gets installed (`caveats`, `desc`, the `service`
+block) needs no new tag or version: merge it into `main` as usual, then copy the formula to the tap
+repository the same way.
+
 ## 4. Verify Homebrew
 
 ```bash

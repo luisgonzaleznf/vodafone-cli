@@ -1,7 +1,8 @@
 # Homebrew formula for vodafone-cli (https://github.com/luisgonzaleznf/vodafone-cli):
 #   brew install luisgonzaleznf/vodafone-cli/vodafone
 # It is maintained in the vodafone-cli repository and copied to the tap repository,
-# luisgonzaleznf/homebrew-vodafone-cli, at each release: see RELEASING.md there.
+# luisgonzaleznf/homebrew-vodafone-cli, at each release and after formula-only changes: see
+# RELEASING.md there.
 class Vodafone < Formula
   desc "JSON-first CLI for your own Mi Vodafone (Spain) account"
   homepage "https://github.com/luisgonzaleznf/vodafone-cli"
@@ -23,6 +24,18 @@ class Vodafone < Formula
     system "uv", "sync", "--frozen", "--no-dev", "--no-editable", "--compile-bytecode",
            "--python", formula_opt_bin("python@3.14")/"python3.14"
     bin.install_symlink libexec/"bin/vodafone"
+  end
+
+  # Shown after install and by `brew info`, before Homebrew's own lines about the service below.
+  def caveats
+    <<~EOS
+      Sign in once with:
+        vodafone auth login
+      The sign-in then renews itself whenever vodafone is used, and lapses only after
+      90 days without use. Optional: to also renew it once a day in the background,
+      start the service after signing in (before that, the daily job would just fail):
+        brew services start luisgonzaleznf/vodafone-cli/vodafone
+    EOS
   end
 
   # Keep the session alive: every refresh also renews the refresh token for about 90 days, so a

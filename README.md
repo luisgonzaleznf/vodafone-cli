@@ -185,7 +185,9 @@ password change, say). A daily scheduled refresh keeps it going:
   which catches up after sleep; on Linux through a systemd timer). Each run appends the refresh's
   JSON (expiry times only, no token values), or its error, to
   `$(brew --prefix)/var/log/vodafone-keepalive.log`. Check it with `brew services info vodafone`, and
-  stop it with `brew services stop luisgonzaleznf/vodafone-cli/vodafone`.
+  stop it with `brew services stop luisgonzaleznf/vodafone-cli/vodafone`. `brew install` prints
+  this hint after installing (`brew info luisgonzaleznf/vodafone-cli/vodafone` shows it again):
+  start the service after `vodafone auth login`, since until then each run fails with exit code 3.
 - **Install script or `uv tool install`:** add a cron entry with `crontab -e`, using the path that
   `which vodafone` prints:
 
