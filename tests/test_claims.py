@@ -48,10 +48,11 @@ def _review(status: str | None, *, ticket: str = TICKET, bill_no: str = OLDER, p
         "hasTicket": True,
         "relatedParty": [{"id": party, "role": "Customer"}, {"id": ACCOUNT}],
         "description": f"Factura {bill_no}\nComentario del cliente:  no reconozco el cargo",
-        "creationDate": "2026-09-12T10:00:00",
-        "lastUpdate": "2026-09-20T10:00:00",
-        "expectedResolutionDate": "2026-10-12T10:00:00",
-        "channel": {"id": "ECARE", "name": "ECARE"},
+        # Spanish local time labelled +0000, as Vodafone sends it.
+        "creationDate": "2026-09-12T12:00:00.000+0000",
+        "lastUpdate": "2026-09-20T12:00:00.000+0000",
+        "expectedResolutionDate": "2026-10-12T12:00:00.000+0000",
+        "channel": {"name": "MVA"},
     }
     if status is not None:
         review["status"] = status
@@ -152,13 +153,14 @@ def test_yes_sends_the_web_apps_body_once(tokens_file, dxl):
         "ticketType": "Peticion",
         "requestedResolutionDate": SENT_AT,
         "channel": {"id": "ECARE"},
-        "note": [{"id": "Comment", "text": _note(LATEST, "El cargo de roaming no es mío (12,10 €).\nGracias")}],
+        "note": [{"id": "Comment", "text": _note(LATEST, "El cargo de roaming no es mío (12,10 EUR).\nGracias")}],
         "@type": "TroubleTicketExtended",
         "relatedParty": [{"id": PARTY}],
     }
     # Serialized as JSON.stringify does: compact, non-ASCII as is.
     assert post.content == json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-    assert "Comentario del cliente:  El cargo".encode() in post.content and b"\\u20ac" not in post.content
+    assert "no es mío".encode() in post.content and b"\\u00ed" not in post.content
+    body["note"][0]["text"].encode("iso-8859-1")  # all of it storable as Vodafone stores it
 
 
 def test_the_note_has_two_spaces_after_the_colon_and_a_real_line_feed():
@@ -359,7 +361,7 @@ def test_dry_run_body_is_what_a_real_send_posts(tokens_file, dxl):
         "\x1b[31mcoloreado",
         "nul\x00byte",
         "x" * 451,
-        "😀" * 226,  # 452 UTF-16 code units, as the textarea's maxlength counts
+        "x" * 448 + "€",  # 452 once written as "x… EUR": the limit counts the text as sent
     ],
 )
 @pytest.mark.parametrize("mode", ["--yes", "--dry-run"])
@@ -374,12 +376,77 @@ def test_an_invalid_message_is_refused_before_any_request(tokens_file, dxl, mess
     assert dxl["requests"] == []
 
 
-@pytest.mark.parametrize("message", ["x" * 450, "😀" * 225, "  " + "y" * 450 + "\n"])
-def test_a_message_up_to_the_forms_limit_is_sent_stripped(tokens_file, dxl, message):
+@pytest.mark.parametrize(
+    ("message", "sent"),
+    [
+        ("x" * 450, "x" * 450),
+        ("ñ" * 450, "ñ" * 450),  # Latin-1 letters count one each, as the textarea counts them
+        ("  " + "y" * 450 + "\n", "y" * 450),
+        ("x" * 446 + " €", "x" * 446 + " EUR"),  # 450 once written out
+    ],
+)
+def test_a_message_up_to_the_forms_limit_is_sent_stripped(tokens_file, dxl, message, sent):
     result = _claim(tokens_file, "latest", "--message", message, "--yes")
 
     assert result.exit_code == 0, result.stderr
-    assert _body(dxl["posts"]()[0])["note"][0]["text"] == _note(LATEST, message.strip())
+    assert _body(dxl["posts"]()[0])["note"][0]["text"] == _note(LATEST, sent)
+
+
+@pytest.mark.parametrize(
+    ("message", "sent"),
+    [
+        ("Me cobran 39,43 € de más", "Me cobran 39,43 EUR de más"),
+        ("Me cobran 39,43€ de más", "Me cobran 39,43 EUR de más"),
+        ("Me cobran €39,43 de más", "Me cobran EUR 39,43 de más"),
+        ("Cuota de 5€/mes", "Cuota de 5 EUR/mes"),
+        ("10 € y 5€.", "10 EUR y 5 EUR."),
+        ("importe (€)", "importe (EUR)"),
+        ("€", "EUR"),
+        ("39,43 €\n¿Por qué?", "39,43 EUR\n¿Por qué?"),
+    ],
+)
+def test_the_euro_sign_is_written_as_eur(message, sent):
+    assert api.claim_text(message) == sent
+
+
+def test_latin_1_text_is_sent_unchanged(tokens_file, dxl):
+    text = "¿Por qué? Año, pingüino, ¡ya! Ç ß ø «x» 1º 2ª ½ ©"
+
+    result = _claim(tokens_file, "latest", "--message", text, "--yes")
+
+    assert result.exit_code == 0, result.stderr
+    assert _body(dxl["posts"]()[0])["note"][0]["text"] == _note(LATEST, text)
+
+
+@pytest.mark.parametrize(
+    ("message", "code_point"),
+    [
+        ("Gracias 😀 por todo", "U+1F600"),
+        ("Dicen “gratis” en la oferta", "U+201C"),
+        ("El cargo — que no reconozco", "U+2014"),
+        ("Cargo del día 1‒5", "U+2012"),
+        ("línea\u2028separada", "U+2028"),
+        ("Cargo de 3 ₤ extra", "U+20A4"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["--yes", "--dry-run"])
+def test_a_character_outside_latin_1_is_refused_naming_its_code_point(tokens_file, dxl, message, code_point, mode):
+    result = _claim(tokens_file, "latest", "--message", message, mode)
+
+    assert result.exit_code == 2
+    error = _error(result)
+    assert error["type"] == "usage" and code_point in error["message"] and "ISO-8859-1" in error["message"]
+    assert message not in result.stderr and message.split()[0] not in error["message"]
+    assert dxl["requests"] == []
+
+
+def test_the_preview_and_dry_run_show_the_text_as_sent(tokens_file, dxl, tty):
+    dry = _claim(tokens_file, "latest", "--message", "Cobro de 39,43€", "--dry-run")
+    asked = _claim(tokens_file, "latest", "--message", "Cobro de 39,43€", input="n\n")
+
+    assert json.loads(dry.stdout)["note"][0]["text"] == _note(LATEST, "Cobro de 39,43 EUR")
+    assert _note(LATEST, "Cobro de 39,43 EUR") in asked.stderr and "39,43€" not in asked.stderr
+    assert dxl["posts"]() == []
 
 
 def test_the_message_is_required(tokens_file, dxl):
@@ -546,14 +613,14 @@ def test_claims_lists_the_reviews_with_their_note(tokens_file, dxl):
         "claims": [
             {
                 "id": "300000004", "status": "Abierto", "invoice_id": LATEST, "billing_account_id": ACCOUNT,
-                "created_at": "2026-09-12T10:00:00", "last_updated_at": "2026-09-20T10:00:00",
-                "expected_resolution_at": "2026-10-12T10:00:00", "channel": "ECARE",
+                "created_at": "2026-09-12T12:00:00.000+0000", "last_updated_at": "2026-09-20T12:00:00.000+0000",
+                "expected_resolution_at": "2026-10-12T12:00:00.000+0000", "channel": "MVA",
                 "note": _note(LATEST, "no reconozco el cargo"),
             },
             {
                 "id": TICKET, "status": "Cerrado", "invoice_id": OLDER, "billing_account_id": ACCOUNT,
-                "created_at": "2026-09-12T10:00:00", "last_updated_at": "2026-09-20T10:00:00",
-                "expected_resolution_at": "2026-10-12T10:00:00", "channel": "ECARE",
+                "created_at": "2026-09-12T12:00:00.000+0000", "last_updated_at": "2026-09-20T12:00:00.000+0000",
+                "expected_resolution_at": "2026-10-12T12:00:00.000+0000", "channel": "MVA",
                 "note": _note(OLDER, "no reconozco el cargo"),
             },
         ],

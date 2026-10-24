@@ -364,10 +364,12 @@ class Claim(BaseModel):
     status: str | None  # Abierto | Reabierto | Cerrado
     invoice_id: str | None  # from the note's "Factura <id>" line
     billing_account_id: str | None
+    # As Vodafone sends them: Spanish local time, though labelled +0000 (e.g. …T12:00:00.000+0000
+    # for a claim sent at 10:00Z in summer). Passed through unconverted.
     created_at: str | None
     last_updated_at: str | None
     expected_resolution_at: str | None
-    channel: str | None
+    channel: str | None  # e.g. MVA for a claim filed from the web app or this CLI
     note: str | None  # the text as filed, "Factura <id>\nComentario del cliente:  …"
 
 

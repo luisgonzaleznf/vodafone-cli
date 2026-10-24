@@ -315,12 +315,18 @@ Vodafone's backend; it stops at the first failure and the error names the files 
 `vodafone invoices claim TARGET --message TEXT` files a bill review ("Revisa tu factura") about one
 invoice, the same request the web app sends from an invoice's "¿Necesitas ayuda con tu factura?"
 screen. It is the CLI's only write. `TARGET` is an invoice id from `invoices list`, or `latest`.
-`--message` is your description of the problem: at most 450 characters (the web form's limit), line
-breaks allowed, no other control characters, surrounding whitespace removed.
+`--message` is your description of the problem: line breaks allowed, no other control characters,
+surrounding whitespace removed. Vodafone stores claims as ISO-8859-1 (Latin-1) text, where `€`
+would turn into `?`, so `€` is written as `EUR`, with a space where it touches a number or word
+(`39,43 €` and `39,43€` both become `39,43 EUR`). Any other character outside ISO-8859-1 (emoji,
+curly quotes `“ ”`, long dashes `—`) is refused with exit 2 and its code point (e.g. `U+201C`);
+Spanish accents, `ñ`, `ü`, `¿` and `¡` are fine. After that replacement the text can be at most 450
+characters, the web form's limit. The confirmation and `--dry-run` show the text as it will be sent.
 
 Before anything is sent, it reads the invoice and Vodafone's bill-review record for its billing
-account. If that account already has an open or reopened review, the claim is refused with exit 5
-(`claim_already_open`): see it with `vodafone invoices claims`. Then:
+account. A billing account can have only one open bill review: while it is open (or reopened), every
+new claim for any of that account's invoices is refused with exit 5 (`claim_already_open`) until
+Vodafone closes it. See it with `vodafone invoices claims`. Then:
 
 - **On a terminal**, it shows on stderr the invoice (id, month, amount) and the full text that will
   be sent, and asks `¿Enviar esta reclamación a Vodafone? [s/N]`. Only `s` / `si` / `sí` sends it;
@@ -350,13 +356,19 @@ trying again. Any other error says the claim was not filed.
       "status": "Abierto",             // Abierto | Reabierto | Cerrado
       "invoice_id": "…",               // from the note's first line
       "billing_account_id": "…",
-      "created_at": "…", "last_updated_at": "…", "expected_resolution_at": "…",
-      "channel": "…",
+      "created_at": "2026-07-01T12:00:00.000+0000",   // Spanish local time, see below
+      "last_updated_at": null, "expected_resolution_at": null,
+      "channel": "MVA",
       "note": "Factura …\nComentario del cliente:  …"
     }
   ]
 }
 ```
+
+The dates in `invoices claims` are passed through as Vodafone sends them, and they are Spanish
+(peninsular) local time even though they end in `+0000`: a claim sent at 10:00 UTC in July shows
+`created_at` as `…T12:00:00.000+0000`. The CLI does not convert them. `sent_at` in the output of
+`invoices claim` is real UTC (`Z`). Fields Vodafone leaves out are `null`.
 
 ### Errors and exit codes
 

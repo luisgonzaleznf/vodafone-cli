@@ -219,7 +219,8 @@ def invoices_claim(
             "--message",
             "-m",
             help=f"What is wrong with the invoice, in your words (at most {api.CLAIM_MAX_LENGTH} characters, the "
-            "web form's limit; line breaks allowed).",
+            "web form's limit; line breaks allowed). Vodafone stores it as ISO-8859-1: € is sent as EUR, and "
+            "other characters outside it (emoji, curly quotes, long dashes) are refused.",
         ),
     ],
     dry_run: Annotated[

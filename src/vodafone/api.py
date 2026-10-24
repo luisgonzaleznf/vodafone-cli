@@ -89,6 +89,12 @@ _PARTY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _NOTE_INVOICE = re.compile(r"Factura ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\r?")  # the note's first line
 # The web form's textarea has maxlength="450", which counts UTF-16 code units.
 CLAIM_MAX_LENGTH = 450
+# The bill-review backend keeps the note as ISO-8859-1 (Latin-1): accents, ñ and ¿ survive a live
+# claim, but "€" comes back as "?". So "€" is written out as "EUR", spaced off a touching number or
+# word ("39,43€" -> "39,43 EUR"), and nothing else above U+00FF is sent.
+_EURO_AFTER_WORD = re.compile(r"(?<=\w)€")
+_EURO_BEFORE_WORD = re.compile(r"€(?=\w)")
+_LATIN_1_MAX = 0xFF
 
 
 def run_with_client(tokens_path: Path, fn: Callable[[DxlClient], T]) -> T:
@@ -469,18 +475,33 @@ def download_invoices(
 # --- bill reviews ("Revisa tu factura") ----------------------------------------------------------
 
 
+def _spell_euro(text: str) -> str:
+    return _EURO_BEFORE_WORD.sub("€ ", _EURO_AFTER_WORD.sub(" €", text)).replace("€", "EUR")
+
+
 def claim_text(message: str) -> str:
-    """The customer's comment as the web form takes it: stripped, non-empty, no control characters
-    except line breaks (\\n), and at most CLAIM_MAX_LENGTH UTF-16 code units. Errors never quote it."""
+    """The customer's comment as it is sent: stripped, non-empty, no control characters except line
+    breaks (\\n), "€" written as "EUR", every other character within ISO-8859-1 (what Vodafone
+    stores), and then at most CLAIM_MAX_LENGTH characters. Errors name a code point, never the text."""
     text = message.strip()
     if not text:
         raise UsageError("--message is empty; describe the problem with the invoice")
     for ch in text:
-        if ch != "\n" and unicodedata.category(ch) in ("Cc", "Cs"):
+        if ch != "\n" and unicodedata.category(ch) == "Cc":
             raise UsageError(f"--message contains a control character (U+{ord(ch):04X}); only line breaks (\\n) are allowed")
-    units = len(text.encode("utf-16-le")) // 2
-    if units > CLAIM_MAX_LENGTH:
-        raise UsageError(f"--message is {units} characters long; the web form takes at most {CLAIM_MAX_LENGTH}")
+    text = _spell_euro(text)
+    for ch in text:
+        if ord(ch) > _LATIN_1_MAX:
+            raise UsageError(
+                f"--message contains U+{ord(ch):04X}, which Vodafone can't store (it keeps claims as ISO-8859-1 "
+                "text: Spanish accents, ñ, ¿ and ¡ are fine, € is sent as EUR); write it with other characters"
+            )
+    # Every character is now one UTF-16 code unit, as the textarea's maxlength counts them.
+    if len(text) > CLAIM_MAX_LENGTH:
+        raise UsageError(
+            f"--message is {len(text)} characters long (with € written as EUR); the web form takes at most "
+            f"{CLAIM_MAX_LENGTH}"
+        )
     return text
 
 
