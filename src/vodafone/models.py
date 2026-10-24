@@ -191,6 +191,65 @@ class WireBillDocuments(Wire):
     items: list[WireBillDocumentsItem]
 
 
+class WireBillOverviewAmount(Wire):
+    grossAmountDue: float | None = None
+    currency: str | None = None
+
+
+class WireBillOverview(Wire):
+    amounts: list[WireBillOverviewAmount] = []  # a list on the wire, though the web app reads it as one object
+
+
+class WireClaimBill(WireBillDocumentsItem):
+    """A customerBills item with the amount the claim confirmation shows. Only the claim reads it,
+    so a change in billOverview's shape can't break `invoices download`."""
+
+    billOverview: WireBillOverview | None = None
+
+
+class WireClaimBills(Wire):
+    items: list[WireClaimBill]
+
+
+# --- /es/billreview/v1/troubleTicket (bill reviews: eligibility lookup, list, create) -----------
+
+
+class WirePartyRef(Wire):
+    id: str | None = None
+    role: str | None = None
+
+
+class WireTicketChannel(Wire):
+    id: str | None = None
+    name: str | None = None
+
+
+class WireTicketNote(Wire):
+    id: str | None = None
+    text: str | None = None
+
+
+class WireBillReviewItem(Wire):
+    """One entry of the lookup. Without a review, a single placeholder: `id` is the party a new
+    review is filed for, relatedParty[0] the billing account. With reviews, one entry per review:
+    relatedParty[0] is that party and relatedParty[1] the billing account."""
+
+    id: str | None = None
+    hasTicket: bool
+    status: str | None = None  # Abierto | Reabierto | Cerrado
+    description: str | None = None  # the note as filed: "Factura <billNo>\nComentario del cliente:  …"
+    note: list[WireTicketNote] | None = None
+    relatedParty: list[WirePartyRef] | None = None
+    channel: WireTicketChannel | None = None
+    creationDate: str | None = None
+    lastUpdate: str | None = None
+    expectedResolutionDate: str | None = None
+
+
+class WireTicketCreated(Wire):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")  # the ticket number the web app shows
+
+
 # --- CLI output ----------------------------------------------------------------------------------
 
 
@@ -298,6 +357,30 @@ class DownloadOutput(BaseModel):
     account_id: str
     directory: str
     invoices: list[InvoiceFile]
+
+
+class Claim(BaseModel):
+    id: str | None  # the ticket number
+    status: str | None  # Abierto | Reabierto | Cerrado
+    invoice_id: str | None  # from the note's "Factura <id>" line
+    billing_account_id: str | None
+    created_at: str | None
+    last_updated_at: str | None
+    expected_resolution_at: str | None
+    channel: str | None
+    note: str | None  # the text as filed, "Factura <id>\nComentario del cliente:  …"
+
+
+class ClaimsOutput(BaseModel):
+    account_id: str
+    claims: list[Claim]
+
+
+class ClaimOutput(BaseModel):
+    ticket_id: str
+    invoice_id: str
+    billing_account_id: str
+    sent_at: str  # the requestedResolutionDate sent, UTC
 
 
 class LoginOutput(BaseModel):

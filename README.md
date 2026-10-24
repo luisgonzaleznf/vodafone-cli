@@ -17,9 +17,13 @@ Code, Codex and similar tools can run the commands directly (see
 | `vodafone auth status` | Access-token validity and refresh-token days remaining (offline) | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
+| `vodafone invoices claims` | Bill reviews ("Revisa tu factura") filed for the account: status, dates, note | ✅ |
+| `vodafone invoices claim` | File a bill review about an invoice with Vodafone (**sends a claim**, only after confirmation) | ✅ |
 | `vodafone auth refresh` | Refresh the access token (and rotate the refresh token); reads do it automatically | ✅ |
 
-Write actions (add-ons, tariff changes, roaming, …) are out of scope for this release.
+Everything is read-only except `vodafone invoices claim`, which files a bill review with Vodafone,
+and only after explicit confirmation (see [Bill reviews](#bill-reviews-claims)). Other write
+actions (add-ons, tariff changes, roaming, …) are out of scope.
 
 ## Requirements
 
@@ -215,6 +219,9 @@ vodafone invoices list        # invoices
 vodafone invoices download            # latest invoice PDF into the current directory
 vodafone invoices download all --dir ~/facturas
 vodafone invoices download <id>       # one invoice; ids come from `invoices list`
+vodafone invoices claims              # bill reviews filed for the account
+vodafone invoices claim latest -m "No reconozco el cargo de roaming" --dry-run   # show the claim; sends nothing
+vodafone invoices claim <id> -m "No reconozco el cargo de roaming"             # SENDS it, after confirmation
 ```
 
 Global options:
@@ -303,6 +310,54 @@ Vodafone's backend; it stops at the first failure and the error names the files 
 `unlimited: true` means there is no numeric cap; the totals then show whatever Vodafone reports
 (often `0` for voice and SMS). Vodafone itself publishes usage data with a 24–48 h delay.
 
+### Bill reviews (claims)
+
+`vodafone invoices claim TARGET --message TEXT` files a bill review ("Revisa tu factura") about one
+invoice, the same request the web app sends from an invoice's "¿Necesitas ayuda con tu factura?"
+screen. It is the CLI's only write. `TARGET` is an invoice id from `invoices list`, or `latest`.
+`--message` is your description of the problem: at most 450 characters (the web form's limit), line
+breaks allowed, no other control characters, surrounding whitespace removed.
+
+Before anything is sent, it reads the invoice and Vodafone's bill-review record for its billing
+account. If that account already has an open or reopened review, the claim is refused with exit 5
+(`claim_already_open`): see it with `vodafone invoices claims`. Then:
+
+- **On a terminal**, it shows on stderr the invoice (id, month, amount) and the full text that will
+  be sent, and asks `¿Enviar esta reclamación a Vodafone? [s/N]`. Only `s` / `si` / `sí` sends it;
+  anything else (or Enter) sends nothing and exits 2 (`cancelled`).
+- **Without a terminal** (a script, a coding agent), it refuses with exit 2 and makes no request at
+  all, unless `--yes` is passed. `--yes` sends without asking.
+- **`--dry-run`** makes the same read-only checks, prints the exact JSON body it would send, and sends
+  nothing (no confirmation needed).
+
+The text Vodafone receives is `Factura <id>`, a line break, then `Comentario del cliente:  <your
+text>`, as the web app writes it. The claim is sent once and never retried, since a second request
+would file a second claim. If its outcome is uncertain (the connection dropped or timed out after
+sending started, Vodafone answered with a 5xx, or accepted it without a readable ticket number), it
+exits 5 with `outcome_unknown`: run `vodafone invoices claims` to see whether it was filed before
+trying again. Any other error says the claim was not filed.
+
+```jsonc
+// vodafone invoices claim latest -m "…" (after confirming)
+{"ticket_id": "…", "invoice_id": "…", "billing_account_id": "…", "sent_at": "2026-10-24T06:09:52.880Z"}
+
+// vodafone invoices claims
+{
+  "account_id": "…",
+  "claims": [
+    {
+      "id": "…",                       // the ticket number
+      "status": "Abierto",             // Abierto | Reabierto | Cerrado
+      "invoice_id": "…",               // from the note's first line
+      "billing_account_id": "…",
+      "created_at": "…", "last_updated_at": "…", "expected_resolution_at": "…",
+      "channel": "…",
+      "note": "Factura …\nComentario del cliente:  …"
+    }
+  ]
+}
+```
+
 ### Errors and exit codes
 
 Errors are written to stderr as JSON:
@@ -320,15 +375,18 @@ response headers: such values are masked or replaced by fixed text.
 |---|---|---|
 | 0 | | Success |
 | 1 | `internal` | Unexpected error (only the exception type is reported) |
-| 2 | `usage` | Invalid arguments (unknown line, unknown invoice id, …), a `--dir` whose filesystem has no hard links, or a token-file folder where the lock file can't be created |
+| 2 | `usage` | Invalid arguments (unknown line, unknown invoice id, an invalid `--message`, …), `invoices claim` without a terminal and without `--yes`, a `--dir` whose filesystem has no hard links, or a token-file folder where the lock file can't be created |
+| 2 | `cancelled` | `invoices claim` was not confirmed at the prompt; nothing was sent |
 | 3 | `auth_expired` | Not signed in: the token file is missing or malformed, or the access token expired and can't be renewed (no refresh token, it expired, or Vodafone refused it); run `vodafone auth login` |
 | 3 | `access_denied` | HTTP 401 while the token is still valid: that account or line was refused, not the session |
 | 5 | `blocked`, `upstream_unavailable` | Bot-protection page, 403 or 429; or a Vodafone 5xx, timeout or stall. Back off before retrying |
+| 5 | `claim_already_open` | The invoice's billing account already has an open or reopened bill review; nothing was sent |
+| 5 | `outcome_unknown` | A claim may or may not have been filed (no answer after sending started, a 5xx, or an unreadable acceptance); check `vodafone invoices claims` before trying again |
 | 7 | `api_changed` | Unexpected status or response shape (including a non-finite number such as `NaN`, which is never written to the JSON output); the API has probably changed |
 
 Requests are sent one at a time with a short delay between them and are never retried
-automatically. The only automatic requests are the refresh of an expiring access token before a
-read: the refresh grant and the identity JWT.
+automatically; the claim of `invoices claim` is sent at most once. The only automatic requests are
+the refresh of an expiring access token before a command: the refresh grant and the identity JWT.
 
 ## Using it from a coding agent
 
@@ -340,7 +398,9 @@ Download it." The agent runs `vodafone invoices list` and `vodafone invoices dow
 - Your password and SMS code are typed only into `vodafone auth login`, never into the chat.
 - Every command renews the session when it needs to (see [Token file location](#token-file-location)),
   so the agent keeps working until the refresh token expires.
-- Every command is read-only: none of them changes anything in your account.
+- Every command is read-only except `invoices claim`, which files a bill review with Vodafone. An
+  agent has no terminal to confirm it, so it is refused unless the agent passes `--yes`: only let it
+  do that for a claim you asked for. `--dry-run` shows the exact claim without sending it.
 
 ## Limitations
 
@@ -372,14 +432,14 @@ Releases (version bump, tag, Homebrew formula, install script, PyPI) are describ
 src/vodafone/
   cli.py          Typer app: commands, exit codes
   auth.py         native login (password + SMS OTP) in steps, token refresh and status
-  api.py          read operations (account, lines, usage, invoices)
+  api.py          read operations (account, lines, usage, invoices, bill reviews) and filing a bill review
   client.py       DxlClient: headers, pacing, HTTP error mapping
   models.py       wire models (DXL responses) and output models (CLI JSON)
   output.py       JSON rendering of output and error payloads
   tokens.py       token-set loading, expiry checks and the token-file lock
   errors.py       typed errors and exit codes
   config.py       hosts, header constants, token-file lookup
-tests/            unit tests (auth, refresh, token store, CLI, client, invoices, install script, packaging) and opt-in live tests
+tests/            unit tests (auth, refresh, token store, CLI, client, invoices, claims, install script, packaging) and opt-in live tests
 Formula/          Homebrew formula (this repository is its own tap)
 .githooks/        personal-data check run before commits and PR text (see Contributing)
 install.sh        curl | sh installer (uv tool install of the pinned release)

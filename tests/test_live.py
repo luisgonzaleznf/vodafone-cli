@@ -1,7 +1,8 @@
 """Read-only checks against the real account, using the default token file.
 
 Skipped unless VODAFONE_LIVE=1. `auth refresh` is not covered: a successful refresh would rotate
-the token set on every run.
+the token set on every run. Nor is `invoices claim`, not even --dry-run: it is the one command that
+can send a claim, so it never runs against the account from a test.
 """
 
 import json
@@ -25,7 +26,7 @@ def _run(*args: str) -> dict:
     return json.loads(result.stdout)
 
 
-@pytest.mark.parametrize("command", [["me"], ["lines"], ["usage"]])
+@pytest.mark.parametrize("command", [["me"], ["lines"], ["usage"], ["invoices", "claims"]])
 def test_read_commands(command):
     _run(*command)
 
