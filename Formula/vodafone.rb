@@ -8,8 +8,8 @@ class Vodafone < Formula
   homepage "https://github.com/luisgonzaleznf/vodafone-cli"
   # The release tag, pinned to its commit.
   url "https://github.com/luisgonzaleznf/vodafone-cli.git",
-      tag:      "v0.3.0",
-      revision: "58ac7b5205995223c0fd9a23a47f0dcd37819fd8"
+      tag:      "v0.4.0",
+      revision: "70c87f4f81b114e2d397f60c90343a364f87bfb1"
   license "MIT"
   head "https://github.com/luisgonzaleznf/vodafone-cli.git", branch: "main"
 
