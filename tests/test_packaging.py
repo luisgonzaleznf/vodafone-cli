@@ -30,3 +30,15 @@ def test_the_formula_offers_a_daily_keepalive_refresh():
 
     assert 'run [opt_bin/"vodafone", "auth", "refresh"]' in formula
     assert "run_type :interval" in formula and "interval 86400" in formula
+
+
+def test_the_formula_caveats_say_to_sign_in_before_starting_the_keepalive():
+    formula = (ROOT / "Formula" / "vodafone.rb").read_text()
+    # Only the caveats heredoc counts: the comment above the service block names the same command.
+    caveats = re.search(r"^  def caveats\n    <<~EOS\n(.*?)^    EOS\n  end$", formula, re.MULTILINE | re.DOTALL)
+
+    assert caveats
+    text = caveats.group(1)
+    assert "vodafone auth login" in text
+    assert "brew services start luisgonzaleznf/vodafone-cli/vodafone" in text
+    assert text.index("vodafone auth login") < text.index("brew services start")
