@@ -1,6 +1,6 @@
 [project]
 name = "vodafone-cli"
-version = "0.3.0"
+version = "0.4.0"
 description = "JSON-first CLI for your own Mi Vodafone (Vodafone España) account, over the DXL API"
 readme = "README.md"
 license = "MIT"

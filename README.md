@@ -77,7 +77,7 @@ freshly installed uv where the installer put it.
 ### uv tool install
 
 ```bash
-uv tool install git+https://github.com/luisgonzaleznf/vodafone-cli@v0.3.0
+uv tool install git+https://github.com/luisgonzaleznf/vodafone-cli@v0.4.0
 ```
 
 This is what the install script runs. To move to another release, run it again with that tag.
