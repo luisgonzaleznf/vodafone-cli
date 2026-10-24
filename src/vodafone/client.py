@@ -2,9 +2,10 @@
 
 Data GETs need the bearer + vf-* headers and a browser User-Agent. Auth POSTs also need a
 csrf-token cookie matching vf-csrf-token, plus the cookies the server set earlier in the flow (such
-as the OTP challenge's JSESSIONID), which the client's cookie jar keeps. Requests are issued one at
-a time with a minimum spacing, and nothing is retried automatically: on a block, rate limit or
-stall we stop and report.
+as the OTP challenge's JSESSIONID), which the client's cookie jar keeps. The one data POST (filing a
+bill review) is sent the same way, as the web app's interceptor does for every API call. Requests
+are issued one at a time with a minimum spacing, and nothing is retried automatically: on a block,
+rate limit or stall we stop and report.
 """
 
 import math
@@ -22,6 +23,7 @@ from .errors import (
     ApiShapeError,
     AuthError,
     BlockedError,
+    OutcomeUnknownError,
     UpstreamError,
     scrub,
 )
@@ -169,6 +171,61 @@ class DxlClient:
             )
         self._check(response, path, method="POST", secrets=secrets, free_text=False)
         return _json_body(response, f"POST {path}")
+
+    def post_json(self, path: str, body: Any, *, secrets: frozenset[str] = frozenset()) -> Any:
+        """POST `body` as JSON to a data endpoint, exactly once, and return the decoded JSON reply.
+
+        Sent as the web app's interceptor sends every API call: bearer + vf-* headers with
+        credentials, so also the csrf-token cookie paired with vf-csrf-token (a csrf-token cookie the
+        server set in the jar is left out, so exactly one goes, matching the header). httpx encodes
+        the JSON compactly without escaping non-ASCII, as JSON.stringify does. Errors map as for a
+        GET; `secrets` (the values sent) are masked in them. A request that may have reached the
+        server without a usable answer (a timeout or dropped connection once sending started, a 5xx,
+        an unreadable 2xx) raises OutcomeUnknownError: it may have taken effect, and it is not
+        retried here or anywhere else.
+        """
+        headers = {**self._headers(), "origin": config.WEB_ORIGIN, "referer": f"{config.WEB_ORIGIN}/"}
+        csrf = headers["vf-csrf-token"]
+        if not _CSRF_TOKEN.fullmatch(csrf):
+            raise AuthError("the CSRF token is not a plain token (letters, digits, '-'); run `vodafone auth login`")
+        request = self._http.build_request("POST", path, json=body, headers=headers)
+        jar = [c for c in request.headers.get("cookie", "").split("; ") if c and not c.startswith("csrf-token=")]
+        request.headers["cookie"] = "; ".join([*jar, f"csrf-token={csrf}"])
+        self._pace()
+        try:
+            response = self._http.send(request)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            # No connection was made, so no byte of the request left this machine.
+            raise UpstreamError(f"POST {path} could not connect ({type(exc).__name__}); nothing was sent")
+        except httpx.HTTPError as exc:
+            # str(exc) can include the full URL or body, so only report the exception type.
+            raise OutcomeUnknownError(
+                f"POST {path} got no answer ({type(exc).__name__}) after sending started; "
+                "it may or may not have been processed"
+            )
+        finally:
+            self._last_request = time.monotonic()
+
+        secrets = self._secrets() | secrets
+        status = response.status_code
+        if 300 <= status < 400 or status >= 500:
+            # A 5xx (an edge's HTML error page too) can come after the backend acted, and a redirect
+            # is no refusal: neither says the request was not processed.
+            detail = _upstream_detail(response, secrets)
+            raise OutcomeUnknownError(
+                f"POST {path} answered HTTP {status}{': ' + detail if detail else ''}; it may or may not have been processed",
+                status=status,
+                transaction_id=_trace_id(response),
+            )
+        self._check(response, path, method="POST", secrets=secrets)
+        try:
+            return _json_body(response, f"POST {path}")
+        except ApiShapeError as err:
+            raise OutcomeUnknownError(
+                f"{err.message}, although it was accepted; it was probably processed",
+                status=response.status_code,
+                transaction_id=_trace_id(response),
+            ) from None
 
     def _secrets(self, *payloads: Any) -> frozenset[str]:
         """Values an error must never echo: the session's tokens and every string sent in `payloads`

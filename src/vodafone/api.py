@@ -1,4 +1,4 @@
-"""Read operations over DxlClient.
+"""Read operations over DxlClient, and the one write: filing a bill review about an invoice.
 
 Each public function returns an output model from models.py; the CLI calls these through
 run_with_client.
@@ -10,7 +10,10 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -19,10 +22,20 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from . import auth, config
 from .client import DxlClient, describe_media_type
-from .errors import ApiShapeError, NotSignedInError, UsageError, VodafoneError
+from .errors import (
+    ApiShapeError,
+    ClaimAlreadyOpenError,
+    NotSignedInError,
+    OutcomeUnknownError,
+    UsageError,
+    VodafoneError,
+)
 from .models import (
     Account,
     Balance,
+    Claim,
+    ClaimOutput,
+    ClaimsOutput,
     DownloadOutput,
     Holder,
     Invoice,
@@ -40,10 +53,14 @@ from .models import (
     WireBill,
     WireBillDocuments,
     WireBillDocumentsItem,
+    WireBillReviewItem,
+    WireClaimBill,
+    WireClaimBills,
     WireCustomerAccount,
     WireCustomerAccounts,
     WireService,
     WireTariffs,
+    WireTicketCreated,
     WireUserProfile,
 )
 from .tokens import FileTokenStore
@@ -61,6 +78,23 @@ _YEAR = re.compile(r"[0-9]{4}")
 _MONTH = re.compile(r"[0-9]{1,2}")
 _DATE_YEAR_MONTH = re.compile(r"([0-9]{4})-([0-9]{2})")
 _BILL_NO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+# Bill reviews ("Revisa tu factura"): the web app's lookup (Ticket.getJourney) and create
+# (billReviewTicketCreation) share this path. The lookup's {customerID} is the billing account.
+_BILL_REVIEW_PATH = "/es/billreview/v1/troubleTicket"
+_CUSTOMER_PARTY_ID = "relatedParty[?(@.role=='Customer')].id"
+_REVIEW_STATUSES = "Abierto,Reabierto,Cerrado"
+_OPEN_REVIEW_STATUSES = ("abierto", "reabierto")  # the web app's P.opened / P.reopened, compared lowercased
+_PARTY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+_NOTE_INVOICE = re.compile(r"Factura ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\r?")  # the note's first line
+# The web form's textarea has maxlength="450", which counts UTF-16 code units.
+CLAIM_MAX_LENGTH = 450
+# The bill-review backend keeps the note as ISO-8859-1 (Latin-1): accents, ñ and ¿ survive a live
+# claim, but "€" comes back as "?". So "€" is written out as "EUR", spaced off a touching number or
+# word ("39,43€" -> "39,43 EUR"), and nothing else above U+00FF is sent.
+_EURO_AFTER_WORD = re.compile(r"(?<=\w)€")
+_EURO_BEFORE_WORD = re.compile(r"€(?=\w)")
+_LATIN_1_MAX = 0xFF
 
 
 def run_with_client(tokens_path: Path, fn: Callable[[DxlClient], T]) -> T:
@@ -335,7 +369,7 @@ def _select_bills(bills: list[WireBillDocumentsItem], target: str) -> list[WireB
     if target == "all":
         return newest_first
     if not bills:
-        raise UsageError("this account has no invoices to download")
+        raise UsageError("this account has no invoices")
     if target == "latest":
         return newest_first[:1]
     for bill in bills:
@@ -436,3 +470,210 @@ def download_invoices(
         else:  # the file appeared during the download; it is left as is
             results.append(InvoiceFile(id=bill.billNo, month=month, file=str(path), bytes=_size(path), status="skipped"))
     return DownloadOutput(account_id=acct, directory=str(directory), invoices=results)
+
+
+# --- bill reviews ("Revisa tu factura") ----------------------------------------------------------
+
+
+def _spell_euro(text: str) -> str:
+    return _EURO_BEFORE_WORD.sub("€ ", _EURO_AFTER_WORD.sub(" €", text)).replace("€", "EUR")
+
+
+def claim_text(message: str) -> str:
+    """The customer's comment as it is sent: stripped, non-empty, no control characters except line
+    breaks (\\n), "€" written as "EUR", every other character within ISO-8859-1 (what Vodafone
+    stores), and then at most CLAIM_MAX_LENGTH characters. Errors name a code point, never the text."""
+    text = message.strip()
+    if not text:
+        raise UsageError("--message is empty; describe the problem with the invoice")
+    for ch in text:
+        if ch != "\n" and unicodedata.category(ch) == "Cc":
+            raise UsageError(f"--message contains a control character (U+{ord(ch):04X}); only line breaks (\\n) are allowed")
+    text = _spell_euro(text)
+    for ch in text:
+        if ord(ch) > _LATIN_1_MAX:
+            raise UsageError(
+                f"--message contains U+{ord(ch):04X}, which Vodafone can't store (it keeps claims as ISO-8859-1 "
+                "text: Spanish accents, ñ, ¿ and ¡ are fine, € is sent as EUR); write it with other characters"
+            )
+    # Every character is now one UTF-16 code unit, as the textarea's maxlength counts them.
+    if len(text) > CLAIM_MAX_LENGTH:
+        raise UsageError(
+            f"--message is {len(text)} characters long (with € written as EUR); the web form takes at most "
+            f"{CLAIM_MAX_LENGTH}"
+        )
+    return text
+
+
+def claim_note(invoice_id: str, text: str) -> str:
+    """The note text exactly as the web app builds it (two spaces after the colon)."""
+    return f"Factura {invoice_id}\nComentario del cliente:  {text}"
+
+
+@dataclass(frozen=True)
+class ClaimDraft:
+    """A bill review ready to send: the invoice it is about, the party it is filed for, and the
+    comment. Built only from the read-only lookups."""
+
+    invoice_id: str
+    billing_account_id: str
+    month: str | None  # YYYY-MM
+    amount: float | None
+    currency: str | None
+    related_party_id: str
+    text: str
+
+    @property
+    def note(self) -> str:
+        return claim_note(self.invoice_id, self.text)
+
+
+def _claim_bill(client: DxlClient, account_id: str, target: str) -> WireClaimBill:
+    if target == "all":
+        raise UsageError("a claim is about one invoice: give its id (from `vodafone invoices list`) or 'latest'")
+    data = client.get_json("/v3/payment/customerBills", {"type": "bill"})
+    bills = [
+        b for b in _parse(WireClaimBills, data, "customerBills").items
+        if b.billingAccount is None or b.billingAccount.id in (None, account_id)
+    ]
+    [bill] = _select_bills(bills, target)
+    if not _BILL_NO.fullmatch(bill.billNo):
+        raise ApiShapeError("the invoice's bill number has characters that are not plain letters, digits or '-'")
+    if bill.billingAccount is None or bill.billingAccount.id != account_id:
+        raise ApiShapeError(f"invoice {bill.billNo} names no billing account, which a bill review is filed against")
+    return bill
+
+
+def _review_entries(client: DxlClient, billing_account_id: str) -> list[WireBillReviewItem]:
+    """The web app's bill-review lookup for one billing account (a flat list: its reviews, or one
+    placeholder when it has none)."""
+    data = client.get_json(_BILL_REVIEW_PATH, {_CUSTOMER_PARTY_ID: billing_account_id, "status": _REVIEW_STATUSES})
+    return _parse(list[WireBillReviewItem], data, "bill review lookup")
+
+
+def _review_party(entries: list[WireBillReviewItem], billing_account_id: str) -> str:
+    """The party a new review is filed for, worked out as the web app's
+    fillSitesEligibleForBillReview does. An open or reopened review means no new one."""
+    if not entries:
+        raise ApiShapeError("the bill review lookup returned nothing for the invoice's billing account; nothing was sent")
+    first = entries[0]
+    parties = first.relatedParty or []
+    if first.hasTicket:
+        if any(e.status is None for e in entries):
+            raise ApiShapeError("a bill review in the lookup has no status, so it can't be told whether one is open; nothing was sent")
+        if any(e.status.strip().lower() in _OPEN_REVIEW_STATUSES for e in entries):
+            raise ClaimAlreadyOpenError(
+                "this billing account already has an open bill review with Vodafone, so no new one was sent; "
+                "see it with `vodafone invoices claims`"
+            )
+        site, party = (parties[1].id, parties[0].id) if len(parties) >= 2 else (None, None)
+    else:
+        site, party = (parties[0].id if parties else None), first.id
+    if site != billing_account_id or not party:
+        raise ApiShapeError("the bill review lookup gave no party for the invoice's billing account; nothing was sent")
+    if not _PARTY_ID.fullmatch(party):
+        raise ApiShapeError("the bill review lookup's party id is not a plain id; nothing was sent")
+    return party
+
+
+def prepare_claim(client: DxlClient, target: str, message: str, account_id: str | None = None) -> ClaimDraft:
+    """Everything a claim needs, from read-only lookups only: the invoice (`target` is a bill id or
+    "latest"), and the party from the bill-review lookup, which also refuses an account whose
+    review is still open. Nothing is sent."""
+    text = claim_text(message)
+    acct = resolve_account_id(client, account_id)
+    bill = _claim_bill(client, acct, target)
+    party = _review_party(_review_entries(client, acct), acct)
+    amounts = bill.billOverview.amounts if bill.billOverview else []
+    return ClaimDraft(
+        invoice_id=bill.billNo,
+        billing_account_id=acct,
+        month=_bill_month(bill),
+        amount=amounts[0].grossAmountDue if amounts else None,
+        currency=amounts[0].currency if amounts else None,
+        related_party_id=party,
+        text=text,
+    )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def claim_body(draft: ClaimDraft, now: datetime | None = None) -> dict[str, Any]:
+    """The POST body, as the web app's TroubleTicket model serializes: its constructor's fields in
+    order, then relatedParty. requestedResolutionDate is the send time, as JSON.stringify writes a
+    Date (UTC, milliseconds)."""
+    sent = (now or _utc_now()).astimezone(UTC)
+    return {
+        "description": "Peticion revision factura",
+        "ticketType": "Peticion",
+        "requestedResolutionDate": f"{sent:%Y-%m-%dT%H:%M:%S}.{sent.microsecond // 1000:03d}Z",
+        "channel": {"id": "ECARE"},
+        "note": [{"id": "Comment", "text": draft.note}],
+        "@type": "TroubleTicketExtended",
+        "relatedParty": [{"id": draft.related_party_id}],
+    }
+
+
+def send_claim(client: DxlClient, draft: ClaimDraft, now: datetime | None = None) -> ClaimOutput:
+    """File the bill review: one POST, never retried (it is not idempotent). Every error says
+    whether the claim was filed: not, when Vodafone refused it or it was never sent; unknown, when
+    the request may have arrived without a usable answer."""
+    body = claim_body(draft, now)
+    sent = frozenset(v for v in (draft.related_party_id, draft.invoice_id, draft.text, draft.note) if len(v) >= 4)
+    try:
+        data = client.post_json(_BILL_REVIEW_PATH, body, secrets=sent)
+    except OutcomeUnknownError as err:
+        err.message = (
+            f"{err.message}. It is unknown whether the claim was filed: check `vodafone invoices claims` "
+            "before filing it again"
+        )
+        raise
+    except VodafoneError as err:
+        err.message = f"{err.message}; the claim was not filed"
+        raise
+    try:
+        ticket = WireTicketCreated.model_validate(data)
+    except ValidationError:
+        raise OutcomeUnknownError(
+            "Vodafone accepted the claim but its reply has no ticket id this CLI recognises, so it was probably "
+            "filed: check `vodafone invoices claims` before filing it again"
+        ) from None
+    return ClaimOutput(
+        ticket_id=ticket.id,
+        invoice_id=draft.invoice_id,
+        billing_account_id=draft.billing_account_id,
+        sent_at=body["requestedResolutionDate"],
+    )
+
+
+def _note_invoice(note: str | None) -> str | None:
+    match = _NOTE_INVOICE.fullmatch((note or "").split("\n", 1)[0])
+    return match.group(1) if match else None
+
+
+def get_claims(client: DxlClient, account_id: str | None = None) -> ClaimsOutput:
+    """The account's bill reviews (open, reopened and closed), from the same lookup the web app's
+    "billReviewTickets" screen shows."""
+    acct = resolve_account_id(client, account_id)
+    claims = []
+    for entry in _review_entries(client, acct):
+        if not entry.hasTicket:  # the lookup's placeholder for an account with no review
+            continue
+        parties = entry.relatedParty or []
+        note = entry.description or next((n.text for n in entry.note or [] if n.text), None)
+        claims.append(
+            Claim(
+                id=entry.id,
+                status=entry.status,
+                invoice_id=_note_invoice(note),
+                billing_account_id=parties[1].id if len(parties) > 1 else None,
+                created_at=entry.creationDate,
+                last_updated_at=entry.lastUpdate,
+                expected_resolution_at=entry.expectedResolutionDate,
+                channel=entry.channel.name if entry.channel else None,
+                note=note,
+            )
+        )
+    return ClaimsOutput(account_id=acct, claims=claims)

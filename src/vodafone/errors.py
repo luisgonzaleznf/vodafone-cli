@@ -45,6 +45,12 @@ class UsageError(VodafoneError):
     kind = "usage"
 
 
+class CancelledError(UsageError):
+    """A write that was not confirmed at the prompt; nothing was sent."""
+
+    kind = "cancelled"
+
+
 class AuthError(VodafoneError):
     """401 with an expired (or missing) access token: run `vodafone auth login`."""
 
@@ -79,6 +85,21 @@ class UpstreamError(BlockedError):
     """Backend 5xx, timeout or stall. Shares exit code 5 with blocks and rate limits."""
 
     kind = "upstream_unavailable"
+
+
+class OutcomeUnknownError(UpstreamError):
+    """A write that may have reached Vodafone without a usable answer: a timeout or dropped
+    connection after sending started, a 5xx, or a success reply that can't be read. It may or may
+    not have taken effect, so it is never retried; the caller checks before trying again."""
+
+    kind = "outcome_unknown"
+
+
+class ClaimAlreadyOpenError(VodafoneError):
+    """The billing account already has an open or reopened bill review, so no new one is sent."""
+
+    exit_code = EXIT_BLOCKED
+    kind = "claim_already_open"
 
 
 class ApiShapeError(VodafoneError):

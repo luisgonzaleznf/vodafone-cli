@@ -15,13 +15,14 @@ from pydantic import BaseModel
 from . import api, auth, package_version
 from .client import DxlClient
 from .config import TOKENS_FILE_ENV, default_tokens_path
-from .errors import EXIT_AUTH, VodafoneError
+from .errors import EXIT_AUTH, CancelledError, UsageError, VodafoneError
 from .output import render, render_error
 from .tokens import FileTokenStore
 
 app = typer.Typer(
     name="vodafone",
-    help="Read your own Mi Vodafone (Vodafone España) account over the DXL API. Output is JSON.",
+    help="Read your own Mi Vodafone (Vodafone España) account over the DXL API, and file bill reviews. "
+    "Output is JSON.",
     no_args_is_help=True,
     add_completion=False,
     # Rich tracebacks print frame locals, which include the bearer header and the NIF query param.
@@ -177,6 +178,86 @@ def invoices_download(
 ) -> None:
     """Save invoice PDFs as factura_YYYY-MM_<id>.pdf, one at a time. Existing files are skipped."""
     _run(ctx, lambda client: api.download_invoices(client, target, directory, ctx.obj.account))
+
+
+def _claim_preview(draft: api.ClaimDraft) -> str:
+    """What the claim sends, for the confirmation prompt. Every value shown was validated: the bill
+    number and month by pattern, the amount as a finite number, the note as the user's own text."""
+    if draft.amount is None:
+        amount = "importe desconocido"
+    else:
+        amount = f"{draft.amount:.2f}".replace(".", ",") + (" €" if draft.currency in (None, "EUR") else f" {draft.currency}")
+    month = f"{draft.month}, " if draft.month else ""
+    return (
+        f"Reclamación (revisión de factura) para Vodafone sobre la factura {draft.invoice_id} ({month}{amount}), "
+        f"cuenta {draft.billing_account_id}. Texto que se enviará:\n"
+        f"----------------------------------------\n{draft.note}\n----------------------------------------"
+    )
+
+
+def _confirm_claim(draft: api.ClaimDraft) -> bool:
+    """Show the claim and ask; only s / si / sí sends it. Not typer.prompt, which writes the
+    prompt's last character to stdout, and stdout carries only the JSON result."""
+    typer.echo(_claim_preview(draft), err=True)
+    typer.echo("¿Enviar esta reclamación a Vodafone? [s/N] ", nl=False, err=True)
+    try:
+        answer = sys.stdin.readline()
+    except KeyboardInterrupt:
+        answer = ""
+    if not answer.endswith("\n"):  # end of input or Ctrl-C: finish the prompt's line
+        typer.echo(err=True)
+    return answer.strip().lower() in ("s", "si", "sí")
+
+
+@invoices_app.command("claim")
+def invoices_claim(
+    ctx: typer.Context,
+    target: Annotated[str, typer.Argument(help="Invoice id (from `invoices list`) or 'latest'.")],
+    message: Annotated[
+        str,
+        typer.Option(
+            "--message",
+            "-m",
+            help=f"What is wrong with the invoice, in your words (at most {api.CLAIM_MAX_LENGTH} characters, the "
+            "web form's limit; line breaks allowed). Vodafone stores it as ISO-8859-1: € is sent as EUR, and "
+            "other characters outside it (emoji, curly quotes, long dashes) are refused.",
+        ),
+    ],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Run the read-only checks and print the JSON body; send nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Send without asking for confirmation.")] = False,
+) -> None:
+    """File a bill review ("Revisa tu factura") about one invoice with Vodafone. This SENDS a claim.
+
+    Refused when the invoice's billing account already has an open review. On a terminal it shows what will be sent and asks first; elsewhere it needs --yes. Sent once, never retried.
+    """  # the paragraph is one line: Typer keeps a docstring's line breaks
+    state: State = ctx.obj
+
+    def claim() -> Any:
+        text = api.claim_text(message)  # before any request
+        if not (dry_run or yes or _interactive()):
+            raise UsageError(
+                "not sent: filing a claim needs confirmation; run it in a terminal to confirm it, or pass --yes"
+            )
+
+        def flow(client: DxlClient) -> Any:
+            draft = api.prepare_claim(client, target, text, state.account)
+            if dry_run:
+                return api.claim_body(draft)
+            if not yes and not _confirm_claim(draft):
+                raise CancelledError("not sent: the claim was not confirmed")
+            return api.send_claim(client, draft).model_dump(mode="json")
+
+        return api.run_with_client(state.tokens_path, flow)
+
+    _emit(claim)
+
+
+@invoices_app.command("claims")
+def invoices_claims(ctx: typer.Context) -> None:
+    """Bill reviews filed for the account (open, reopened and closed), with their status and note."""
+    _run(ctx, lambda client: api.get_claims(client, ctx.obj.account))
 
 
 @auth_app.command("status")
