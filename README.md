@@ -17,7 +17,7 @@ Code, Codex and similar tools can run the commands directly (see
 | `vodafone auth status` | Access-token validity and refresh-token days remaining (offline) | ✅ |
 | `vodafone invoices list` | Invoices with amount, dates and status | ✅ |
 | `vodafone invoices download` | Invoice PDFs (one, the latest, or all) | ✅ |
-| `vodafone invoices claims` | Bill reviews ("Revisa tu factura") filed for the account: status, dates, note | ✅ |
+| `vodafone invoices claims` | Bill reviews ("Revisa tu factura") filed for the account: status, dates, resolution date, note | ✅ |
 | `vodafone invoices claim` | File a bill review about an invoice with Vodafone (**sends a claim**, only after confirmation) | ✅ |
 | `vodafone auth refresh` | Refresh the access token (and rotate the refresh token); reads do it automatically | ✅ |
 
@@ -358,8 +358,10 @@ trying again. Any other error says the claim was not filed.
       "billing_account_id": "…",
       "created_at": "2026-07-01T12:00:00.000+0000",   // Spanish local time, see below
       "last_updated_at": null, "expected_resolution_at": null,
+      "resolved_at": null,             // set once Cerrado, see below
       "channel": "MVA",
-      "note": "Factura …\nComentario del cliente:  …"
+      "note": "Factura …\nComentario del cliente:  …",
+      "details": {}                    // Vodafone's back-office fields, e.g. {"ESTADO": "CLOSED", …}
     }
   ]
 }
@@ -369,6 +371,13 @@ The dates in `invoices claims` are passed through as Vodafone sends them, and th
 (peninsular) local time even though they end in `+0000`: a claim sent at 10:00 UTC in July shows
 `created_at` as `…T12:00:00.000+0000`. The CLI does not convert them. `sent_at` in the output of
 `invoices claim` is real UTC (`Z`). Fields Vodafone leaves out are `null`.
+
+Once a claim is `Cerrado`, `resolved_at` is its `expected_resolution_at`, the date the web app shows
+as "Resuelta el día". `details` holds the other notes Vodafone attaches to the ticket, passed through
+as sent (on a closed claim, fields like `ESTADO: CLOSED` and `Submotivo`). Neither the API nor
+the web app shows Vodafone's decision: a closed claim only reads "Tu factura ha sido revisada por
+nuestros agentes". The answer comes by email, SMS or phone, and any credit appears on a later
+invoice (`invoices list`, `invoices download`).
 
 ### Errors and exit codes
 

@@ -256,7 +256,7 @@ def invoices_claim(
 
 @invoices_app.command("claims")
 def invoices_claims(ctx: typer.Context) -> None:
-    """Bill reviews filed for the account (open, reopened and closed), with their status and note."""
+    """Bill reviews filed for the account (open, reopened and closed), with their status, resolution date and note."""
     _run(ctx, lambda client: api.get_claims(client, ctx.obj.account))
 
 
