@@ -369,8 +369,12 @@ class Claim(BaseModel):
     created_at: str | None
     last_updated_at: str | None
     expected_resolution_at: str | None
+    resolved_at: str | None  # expected_resolution_at once the claim is Cerrado, as the web app shows it
     channel: str | None  # e.g. MVA for a claim filed from the web app or this CLI
     note: str | None  # the text as filed, "Factura <id>\nComentario del cliente:  …"
+    # Vodafone's back-office fields, as sent (e.g. ESTADO: CLOSED). Vodafone's decision itself is
+    # not in the API or the web app; it arrives by email, SMS or phone, or on a later invoice.
+    details: dict[str, str]
 
 
 class ClaimsOutput(BaseModel):

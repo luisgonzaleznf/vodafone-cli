@@ -614,14 +614,15 @@ def test_claims_lists_the_reviews_with_their_note(tokens_file, dxl):
             {
                 "id": "300000004", "status": "Abierto", "invoice_id": LATEST, "billing_account_id": ACCOUNT,
                 "created_at": "2026-09-12T12:00:00.000+0000", "last_updated_at": "2026-09-20T12:00:00.000+0000",
-                "expected_resolution_at": "2026-10-12T12:00:00.000+0000", "channel": "MVA",
-                "note": _note(LATEST, "no reconozco el cargo"),
+                "expected_resolution_at": "2026-10-12T12:00:00.000+0000", "resolved_at": None, "channel": "MVA",
+                "note": _note(LATEST, "no reconozco el cargo"), "details": {},
             },
             {
                 "id": TICKET, "status": "Cerrado", "invoice_id": OLDER, "billing_account_id": ACCOUNT,
                 "created_at": "2026-09-12T12:00:00.000+0000", "last_updated_at": "2026-09-20T12:00:00.000+0000",
-                "expected_resolution_at": "2026-10-12T12:00:00.000+0000", "channel": "MVA",
-                "note": _note(OLDER, "no reconozco el cargo"),
+                "expected_resolution_at": "2026-10-12T12:00:00.000+0000",
+                "resolved_at": "2026-10-12T12:00:00.000+0000", "channel": "MVA",
+                "note": _note(OLDER, "no reconozco el cargo"), "details": {},
             },
         ],
     }
@@ -644,6 +645,66 @@ def test_claims_reads_the_note_list_when_there_is_no_description(tokens_file, dx
 
     assert claim["note"] == "otra cosa"
     assert claim["invoice_id"] is None and claim["billing_account_id"] is None and claim["channel"] is None
+    assert claim["resolved_at"] is None  # Cerrado, but no date to show
+
+
+# The shape of a closed review's notes in a live lookup: back-office fields, never the claim text.
+BACK_OFFICE_NOTES = [
+    {"id": "CATEG_OPERACIONAL_1", "text": "Email"},
+    {"id": "Submotivo", "text": "Revisión factura"},
+    {"id": "NumAveriasCliente", "text": "0"},
+    {"id": "ESTADO", "text": "CLOSED"},
+]
+
+
+def test_claims_shows_the_back_office_notes_as_details(tokens_file, dxl):
+    dxl["review"] = [{**_review("Cerrado"), "note": BACK_OFFICE_NOTES}]
+
+    [claim] = json.loads(_claims(tokens_file).stdout)["claims"]
+
+    assert claim["details"] == {
+        "CATEG_OPERACIONAL_1": "Email", "Submotivo": "Revisión factura", "NumAveriasCliente": "0", "ESTADO": "CLOSED",
+    }
+    assert claim["note"] == _note(OLDER, "no reconozco el cargo")
+
+
+def test_claims_never_takes_a_back_office_note_for_the_claim_text(tokens_file, dxl):
+    sparse = {"id": TICKET, "hasTicket": True, "status": "Cerrado", "note": BACK_OFFICE_NOTES}
+    dxl["review"] = [sparse]
+
+    [claim] = json.loads(_claims(tokens_file).stdout)["claims"]
+
+    assert claim["note"] is None
+    assert claim["details"]["ESTADO"] == "CLOSED"
+
+
+def test_the_claim_text_note_is_not_repeated_in_details(tokens_file, dxl):
+    sparse = {"id": TICKET, "hasTicket": True, "status": "Abierto",
+              "note": [{"id": "Comment", "text": "otra cosa"}, {"id": "ESTADO", "text": "OPEN"}, {"id": None, "text": "x"}]}
+    dxl["review"] = [sparse]
+
+    [claim] = json.loads(_claims(tokens_file).stdout)["claims"]
+
+    assert (claim["note"], claim["details"]) == ("otra cosa", {"ESTADO": "OPEN"})
+
+
+@pytest.mark.parametrize("status", ["Cerrado", "CERRADO", " cerrado "])
+def test_a_closed_claim_is_resolved_on_its_expected_date(tokens_file, dxl, status):
+    dxl["review"] = [_review(status)]
+
+    [claim] = json.loads(_claims(tokens_file).stdout)["claims"]
+
+    assert claim["resolved_at"] == claim["expected_resolution_at"] == "2026-10-12T12:00:00.000+0000"
+
+
+@pytest.mark.parametrize("status", ["Abierto", "Reabierto", None])
+def test_an_open_claim_has_no_resolved_date(tokens_file, dxl, status):
+    dxl["review"] = [_review(status)]
+
+    [claim] = json.loads(_claims(tokens_file).stdout)["claims"]
+
+    assert claim["resolved_at"] is None
+    assert claim["expected_resolution_at"] == "2026-10-12T12:00:00.000+0000"
 
 
 def test_claims_with_an_unexpected_reply_is_api_changed(tokens_file, dxl):

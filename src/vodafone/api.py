@@ -85,6 +85,8 @@ _BILL_REVIEW_PATH = "/es/billreview/v1/troubleTicket"
 _CUSTOMER_PARTY_ID = "relatedParty[?(@.role=='Customer')].id"
 _REVIEW_STATUSES = "Abierto,Reabierto,Cerrado"
 _OPEN_REVIEW_STATUSES = ("abierto", "reabierto")  # the web app's P.opened / P.reopened, compared lowercased
+_CLOSED_REVIEW_STATUS = "cerrado"  # P.closed
+_CLAIM_NOTE_ID = "Comment"  # the note holding the claim text; the lookup's other notes are back-office fields
 _PARTY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _NOTE_INVOICE = re.compile(r"Factura ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\r?")  # the note's first line
 # The web form's textarea has maxlength="450", which counts UTF-16 code units.
@@ -610,7 +612,7 @@ def claim_body(draft: ClaimDraft, now: datetime | None = None) -> dict[str, Any]
         "ticketType": "Peticion",
         "requestedResolutionDate": f"{sent:%Y-%m-%dT%H:%M:%S}.{sent.microsecond // 1000:03d}Z",
         "channel": {"id": "ECARE"},
-        "note": [{"id": "Comment", "text": draft.note}],
+        "note": [{"id": _CLAIM_NOTE_ID, "text": draft.note}],
         "@type": "TroubleTicketExtended",
         "relatedParty": [{"id": draft.related_party_id}],
     }
@@ -662,7 +664,9 @@ def get_claims(client: DxlClient, account_id: str | None = None) -> ClaimsOutput
         if not entry.hasTicket:  # the lookup's placeholder for an account with no review
             continue
         parties = entry.relatedParty or []
-        note = entry.description or next((n.text for n in entry.note or [] if n.text), None)
+        notes = entry.note or []
+        note = entry.description or next((n.text for n in notes if n.id == _CLAIM_NOTE_ID and n.text), None)
+        closed = (entry.status or "").strip().lower() == _CLOSED_REVIEW_STATUS
         claims.append(
             Claim(
                 id=entry.id,
@@ -672,8 +676,11 @@ def get_claims(client: DxlClient, account_id: str | None = None) -> ClaimsOutput
                 created_at=entry.creationDate,
                 last_updated_at=entry.lastUpdate,
                 expected_resolution_at=entry.expectedResolutionDate,
+                # The web app's closed card shows expectedResolutionDate as "Resuelta el día".
+                resolved_at=entry.expectedResolutionDate if closed else None,
                 channel=entry.channel.name if entry.channel else None,
                 note=note,
+                details={n.id: n.text for n in notes if n.id and n.id != _CLAIM_NOTE_ID and n.text is not None},
             )
         )
     return ClaimsOutput(account_id=acct, claims=claims)
