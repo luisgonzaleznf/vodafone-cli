@@ -78,6 +78,7 @@ _YEAR = re.compile(r"[0-9]{4}")
 _MONTH = re.compile(r"[0-9]{1,2}")
 _DATE_YEAR_MONTH = re.compile(r"([0-9]{4})-([0-9]{2})")
 _BILL_NO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+_BILL_ISSUING = "inprogress"  # customerBills status of a bill Vodafone is still issuing, compared lowercased
 
 # Bill reviews ("Revisa tu factura"): the web app's lookup (Ticket.getJourney) and create
 # (billReviewTicketCreation) share this path. The lookup's {customerID} is the billing account.
@@ -366,18 +367,31 @@ def _file_name(bill: WireBillDocumentsItem) -> str:
     return f"factura_{month}_{bill.billNo}.pdf" if month else f"factura_{bill.billNo}.pdf"
 
 
-def _select_bills(bills: list[WireBillDocumentsItem], target: str) -> list[WireBillDocumentsItem]:
+def _bill_documents(client: DxlClient) -> tuple[Any, bool]:
+    """The customerBills?type=bill reply without the bill Vodafone is still issuing, and whether it
+    had one. Until that bill's PDF is ready the list carries it as a placeholder (status inProgress)
+    with no number, date or document, while `invoices list` already shows it."""
+    data = client.get_json("/v3/payment/customerBills", {"type": "bill"})
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return data, False  # left for _parse to reject
+    issued = [b for b in items if not (isinstance(b, dict) and str(b.get("status") or "").lower() == _BILL_ISSUING)]
+    return {**data, "items": issued}, len(issued) < len(items)
+
+
+def _select_bills(bills: list[WireBillDocumentsItem], target: str, issuing: bool = False) -> list[WireBillDocumentsItem]:
     newest_first = sorted(bills, key=lambda b: (b.creationDate or "", _bill_month(b) or ""), reverse=True)
+    hint = " (one bill is still being issued and has no PDF yet)" if issuing else ""
     if target == "all":
         return newest_first
     if not bills:
-        raise UsageError("this account has no invoices")
+        raise UsageError(f"this account has no invoices{hint}")
     if target == "latest":
         return newest_first[:1]
     for bill in bills:
         if bill.billNo == target:
             return [bill]
-    raise UsageError(f"no invoice with id {target!r}; ids are listed by `vodafone invoices list`")
+    raise UsageError(f"no invoice with id {target!r}; ids are listed by `vodafone invoices list`{hint}")
 
 
 def _download_path(bill: WireBillDocumentsItem) -> str:
@@ -435,12 +449,12 @@ def download_invoices(
     the backend), and stop at the first failure. Existing files are skipped, never overwritten.
     """
     acct = resolve_account_id(client, account_id)
-    data = client.get_json("/v3/payment/customerBills", {"type": "bill"})
+    data, issuing = _bill_documents(client)
     bills = [
         b for b in _parse(WireBillDocuments, data, "customerBills").items
         if b.billingAccount is None or b.billingAccount.id in (None, acct)
     ]
-    selected = _select_bills(bills, target)
+    selected = _select_bills(bills, target, issuing)
     # Every name is checked before anything is downloaded or written.
     paths = {bill.billNo: directory / _file_name(bill) for bill in selected}
     if any(path.parent != directory for path in paths.values()):  # backstop: _file_name is one component
@@ -533,12 +547,12 @@ class ClaimDraft:
 def _claim_bill(client: DxlClient, account_id: str, target: str) -> WireClaimBill:
     if target == "all":
         raise UsageError("a claim is about one invoice: give its id (from `vodafone invoices list`) or 'latest'")
-    data = client.get_json("/v3/payment/customerBills", {"type": "bill"})
+    data, issuing = _bill_documents(client)
     bills = [
         b for b in _parse(WireClaimBills, data, "customerBills").items
         if b.billingAccount is None or b.billingAccount.id in (None, account_id)
     ]
-    [bill] = _select_bills(bills, target)
+    [bill] = _select_bills(bills, target, issuing)
     if not _BILL_NO.fullmatch(bill.billNo):
         raise ApiShapeError("the invoice's bill number has characters that are not plain letters, digits or '-'")
     if bill.billingAccount is None or bill.billingAccount.id != account_id:

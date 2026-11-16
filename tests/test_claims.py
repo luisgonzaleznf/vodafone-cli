@@ -475,6 +475,17 @@ def test_an_unknown_invoice_or_all_is_a_usage_error_and_sends_nothing(tokens_fil
     assert [r for r in dxl["requests"] if r.url.path == REVIEW_PATH] == []
 
 
+def test_latest_skips_a_bill_still_being_issued(tokens_file, dxl):
+    issuing = {"status": "inProgress", "billingCycle": {"billingYear": "2026", "billingMonth": "11"},
+               "billingAccount": {"id": ACCOUNT}, "documents": []}
+    dxl["bills"] = [*dxl["bills"], issuing]
+
+    result = _claim(tokens_file, "latest", "--message", "x", "--dry-run")
+
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["note"][0]["text"].startswith(f"Factura {LATEST}\n")
+
+
 def test_another_accounts_invoice_is_not_found(tokens_file, dxl):
     dxl["bills"] = [_bill(LATEST, 10), _bill("XX00-000000011", 11, account=OTHER_ACCOUNT)]
 

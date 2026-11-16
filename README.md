@@ -303,7 +303,10 @@ nothing is written outside `--dir`. Files are written with mode `0600`, and a PD
 its final name once complete: it is written to a hidden temp file and hard-linked into place. On a
 filesystem without hard links (FAT, some network shares) the download stops with a `usage` error
 and writes nothing, rather than risk a partial or overwritten file; pick another `--dir`. Existing
-files (including one that appears during the download) are skipped, never overwritten. `all`
+files (including one that appears during the download) are skipped, never overwritten. A bill
+Vodafone is still issuing (already in `invoices list`, but without a PDF yet) is left out, here and
+in `invoices claim`: `latest` is the newest bill with a PDF, and the new bill's id is refused until
+its PDF is ready. `all`
 downloads newest first, one at a time with a 2-second gap, because a burst of downloads stalls
 Vodafone's backend; it stops at the first failure and the error names the files saved so far.
 
