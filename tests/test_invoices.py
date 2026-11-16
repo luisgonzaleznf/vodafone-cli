@@ -37,6 +37,16 @@ def _bill(bill_no: str, month: int, n: int, *, account: str = ACCOUNT, host: str
 
 # Oldest first, as the API returns them.
 BILLS = [_bill("B0000000000008", 8, 8), _bill("B0000000000009", 9, 9), _bill("B0000000000010", 10, 10)]
+# A bill Vodafone is still issuing, as the list carries it until its PDF is ready: no number, date
+# or document (the live shape).
+ISSUING = {
+    "status": "inProgress",
+    "billingCycle": {"billingDate": "15", "billingMonth": "11", "billingYear": "2026",
+                     "startDate": "2026-10-15T00:00", "endDate": "2026-11-14T23:59"},
+    "billingAccount": {"id": ACCOUNT},
+    "documents": [],
+    "subscriptions": [],
+}
 
 
 @pytest.fixture
@@ -124,7 +134,38 @@ def test_download_by_id_and_unknown_id(tokens_file, dxl, tmp_path):
 
     unknown = _download(tokens_file, tmp_path, "B9999999999999")
     assert unknown.exit_code == 2
-    assert json.loads(unknown.stderr)["error"]["type"] == "usage"
+    error = json.loads(unknown.stderr)["error"]
+    assert error["type"] == "usage" and "being issued" not in error["message"]
+
+
+@pytest.mark.parametrize("target, months", [("latest", ["2026-10"]), ("all", ["2026-10", "2026-09", "2026-08"])])
+def test_a_bill_still_being_issued_is_skipped(tokens_file, dxl, tmp_path, target, months):
+    dxl["bills"] = [*BILLS, ISSUING]
+
+    result = _download(tokens_file, tmp_path, target)
+
+    assert result.exit_code == 0, result.stderr
+    assert [r["month"] for r in json.loads(result.stdout)["invoices"]] == months
+
+
+def test_an_unknown_id_while_a_bill_is_being_issued_says_so(tokens_file, dxl, tmp_path):
+    dxl["bills"] = [*BILLS, ISSUING]
+
+    result = _download(tokens_file, tmp_path, "B0000000000011")
+
+    assert result.exit_code == 2
+    assert "one bill is still being issued and has no PDF yet" in json.loads(result.stderr)["error"]["message"]
+
+
+def test_an_issued_bill_without_a_number_is_still_an_api_change(tokens_file, dxl, tmp_path):
+    bill = _bill("B0000000000010", 10, 10)
+    del bill["billNo"]
+    dxl["bills"] = [bill]
+
+    result = _download(tokens_file, tmp_path, "latest")
+
+    assert result.exit_code == 7
+    assert json.loads(result.stderr)["error"]["type"] == "api_changed"
 
 
 def test_bills_sharing_a_month_get_distinct_files(tokens_file, dxl, tmp_path):
